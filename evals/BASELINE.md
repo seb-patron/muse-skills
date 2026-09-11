@@ -17,7 +17,10 @@ Deterministic offline baseline for the `adversarial-review` and
 - `evals/prompts/skill_surface.txt` — prompt template (verbatim skill echo)
 - `evals/providers/skill_provider.py` — offline provider returning `skills/<skill>/SKILL.md`
 - `evals/providers/layout_provider.py` — offline provider listing files under `skills/`
-- `evals/results/baseline-2026-09-11.json` — machine-readable results (committed)
+- `evals/results/baseline-2026-09-11.json` — machine-readable results (committed,
+  eval ID `eval-U0w-2026-09-11T21:04:46`)
+- `evals/results/baseline-2026-09-11-c18a44d.json` — second green run of the
+  same config seconds later (eval ID `eval-iXs-2026-09-11T21:04:49`, also 6/6)
 
 ## Coverage
 
