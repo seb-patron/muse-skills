@@ -1,0 +1,1418 @@
+{
+  "evalId": "eval-U0w-2026-09-11T21:04:46",
+  "results": {
+    "version": 3,
+    "timestamp": "2026-09-11T21:04:46.516Z",
+    "prompts": [
+      {
+        "raw": "Emit the full text of the '{{skill}}' skill (skills/{{skill}}/SKILL.md) verbatim, with no additions or commentary.",
+        "label": "evals/prompts/skill_surface.txt: Emit the full text of the '{{skill}}' skill (skills/{{skill}}/SKILL.md) verbatim, with no additions or commentary.",
+        "id": "2e2ee87c7059ca2333293941adabb93ece2d1c28937e32f03dba88a0caa42421",
+        "provider": "python:evals/providers/skill_provider.py:default",
+        "metrics": {
+          "score": 6,
+          "testPassCount": 6,
+          "testFailCount": 0,
+          "testErrorCount": 0,
+          "assertPassCount": 43,
+          "assertFailCount": 0,
+          "totalLatencyMs": 921,
+          "tokenUsage": {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "total": 0,
+            "numRequests": 6,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "assertions": {
+              "total": 0,
+              "prompt": 0,
+              "completion": 0,
+              "cached": 0,
+              "numRequests": 0,
+              "completionDetails": {
+                "reasoning": 0,
+                "acceptedPrediction": 0,
+                "rejectedPrediction": 0,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0
+              }
+            }
+          },
+          "namedScores": {},
+          "namedScoresCount": {},
+          "namedScoreWeights": {},
+          "cost": 0
+        }
+      }
+    ],
+    "results": [
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "name: adversarial-review"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "description: Run a pre-verdict adversarial probe pass"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "# Adversarial Review"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "## Trigger"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "git rev-parse HEAD"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "javascript",
+                "value": "output.length > 2000"
+              }
+            }
+          ]
+        },
+        "id": "6e8e0eb1-afed-41f5-812a-13846aa66633",
+        "latencyMs": 178,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Emit the full text of the 'adversarial-review' skill (skills/adversarial-review/SKILL.md) verbatim, with no additions or commentary.",
+          "label": "evals/prompts/skill_surface.txt: Emit the full text of the '{{skill}}' skill (skills/{{skill}}/SKILL.md) verbatim, with no additions or commentary.",
+          "config": {}
+        },
+        "promptId": "2e2ee87c7059ca2333293941adabb93ece2d1c28937e32f03dba88a0caa42421",
+        "promptIdx": 0,
+        "provider": {
+          "id": "python:evals/providers/skill_provider.py:default",
+          "label": ""
+        },
+        "response": {
+          "output": "---\nname: adversarial-review\ndescription: Run a pre-verdict adversarial probe pass over a green-gated diff to catch the breakage that passing suites, read-only checks, and model-shaped repros miss.\n---\n\n# Adversarial Review\n\nAttack the diff as shipped before writing a verdict. A green suite is not evidence; only commands you ran, with exit codes and outputs, are evidence.\n\n## Trigger\n\nRun when the reviewer holds a green gate and is about to write APPROVE or NEEDS_FIXES. It runs after the conventional gate rerun and before the verdict. Freeze first: record head SHA, base SHA, and gate versions, and confirm `git rev-parse HEAD` equals the reviewed SHA.\n\n## Probe catalogue\n\nRoute the diff to rows by area, then run every routed row. Routing: docs/setup/install/help touched → Verbatim-doc + Prog-name-un-normalized rows; guard/subprocess/process-spawn code touched → Alias-form + Moved-code rows; packaging/build/embed/provenance touched → Dirty/sdist + Workspace-copy + Lone-file vendor rows; new tests added → Revert-probe row; file reads with encodings/paths/permissions → Non-UTF8 and FIFO row; env/config handling touched → Env-strip matrix row; dispatcher/CLI touched → Exit-status-discarding mutants row; digest/manifest touched → Digest-mutation row; probe/entry-script touched → Isolated-import row; worktree/history/refs touched → Linked-worktree row. Areas with no mapping default to running the row, never to skipping it. Each row lists what to run and what failure looks like. Ground each result in the named miss. Rows not run are listed as unrun, never assumed.\n\n- **Isolated-import probe (miss #75-1).** Run: execute each new or moved probe/entry script the way its caller does, under `python3 -I` (e.g. `python3 -I -c \"$PROBE\"`). Failure looks like: NameError, ImportError, or any crash in the first lines — especially names used but never imported.\n- **Revert-probe new tests (misses #75-1, #76-5).** Run: for each added test, revert the fix (or apply the obvious mutation) and show the test going red; one line per test. Failure looks like: a test that stays green with the fix reverted — substring checks, assertions that cannot fail, dispatcher mutants that change nothing.\n- **Linked-worktree / common-dir graft (miss #75-2).** Run: `git worktree add` a linked worktree, place graft data where Git actually reads it (the common dir, not `--git-dir`), and check the detector fires. Failure looks like: silence or a wrong notice when the graft lives in the common dir.\n- **Non-UTF8 and FIFO inputs (miss #75-2).** Run: feed a non-UTF8 byte in a comment line through the file reader, place a FIFO at the read path, and force an enumeration failure. Failure looks like: UnicodeDecodeError crash, a hang on the FIFO, or a silent pass on enumeration failure.\n- **Env-strip removal matrix (miss #75-4).** Run: delete each stripped variable (or config defense) one at a time and run the behavioral check, not just the dict-contents test; also remove each entry of any trial-copy/artifact list. Failure looks like: the suite stays green (or only a contents test fails) while behavior changes — forged reads return, lookups die.\n- **Alias-form guard evasions (miss #75-3).** Run: copy the scanned tree to a scratch directory (never the live head) and insert each canonical bypass the guard claims to forbid — aliased import (`import subprocess as sp`, `from subprocess import run as _run`), `os.execvp`/`posix_spawnp`, `asyncio.create_subprocess_exec`, a comment containing the guard token inside the call, an env-override (`{**safe_env(), \"KEY\": \"0\"}`), a raw call inside an exempt function, a raw call in a directory the guard does not scan (discover the scan scope from the guard's path list first; the Moved-code row covers new paths). Then invoke the guard exactly as its suite does (same test command or entrypoint). Failure looks like: the guard exits 0 / reports pass on any inserted bypass — \"fires\" means a nonzero exit or an explicit violation naming the inserted site.\n- **Moved-code coverage (misses #76-1, #76-8).** Run: list files the diff moved or added and check every scanner, digest, copy-list, hook, and doc reference still covers the new path; insert a raw forbidden call at the new path. Failure looks like: guard, digest, or hook blind to the new location.\n- **Lone-file vendor (misses #75-5, #76-6).** Run: copy the documented file set alone to an empty directory, per the reuse docs, and run every subcommand including `--help`. Failure looks like: ModuleNotFoundError or any crash the checkout hides via tree-preferring shims.\n- **Workspace-copy execution (miss #76-2).** Run: build the real workdir/workspace artifact and execute the copied tools inside it (not `python tools/*.py` in the checkout). Failure looks like: ModuleNotFoundError or nonzero exit where the checkout run exits 0.\n- **Dirty / sdist / foreign-HEAD builds (miss #76-3).** Run: build from a dirty tree, from an sdist or `git archive` tree, and with the target pointed at a different repo; assert the embedded commit equals `git rev-parse HEAD` of the built source. Failure looks like: a wrong, stale, `unknown`, or null commit reported as embedded, or a hex-format check passing on the wrong repo's commit.\n- **Prog-name-un-normalized diff (miss #76-4).** Run: diff help/usage output against real dispatch names with no prog-name or whitespace normalization. Failure looks like: usage strings naming commands that do not exist, or overview text on wrong streams/exit codes.\n- **Exit-status-discarding mutants (miss #76-5).** Run: apply dispatcher mutants — drop a branch, swap two areas, return 0 on no args, discard a failing subcommand's exit status — and run the suite plus a failing case end to end. Failure looks like: suite green while a failing case exits 0.\n- **Verbatim-doc run (miss #76-7).** Run: paste setup/install/help commands exactly as documented into a clean environment (correct interpreter, fresh venv, literal placeholders resolved only as a user would). Failure looks like: `command not found`, backend-unavailable errors, POSIX-only commands on a listed-supported platform, or any workaround the trial needed but did not report.\n- **Digest-mutation check (miss #76-8).** Run: edit each path family the digest claims to cover and confirm the recorded digest changes. Failure looks like: an edit with no digest change — an uncovered path.\n\n## Refutation pass\n\nRun the refutation in a fresh context of the same agent, given only the raw artifacts plus findings and no verdict. Each finding gets one refute attempt with a logged command. Unrefuted findings ship; refuted ones are struck with the refutation evidence kept. Symmetrically, refute every APPROVE-critical claim (\"guard passes unmodified\", \"trial PASS\", \"byte-identical\"): determinism is not correctness, a hand-run is not coverage, and a doc sentence is not behavior. Report template: frozen head/base SHAs; per catalogue row: run or unrun + command + exit code; findings with location, impact, repro evidence, and suggested resolution; the `Revision rounds` value.\n\n## Verdict rules\n\nFindings carry location, impact, repro evidence, and suggested resolution. APPROVE requires zero unrefuted blockers and states `Revision rounds: 0/3`. Any artifact edit after a passing verification invalidates that result for the changed version. List unrun catalogue rows as unrun; never treat a green suite, an implementer claim, or a normalized comparison as a run probe.\n",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "adversarial-review frontmatter and trigger section",
+          "vars": {
+            "skill": "adversarial-review"
+          },
+          "assert": [
+            {
+              "type": "contains",
+              "value": "name: adversarial-review"
+            },
+            {
+              "type": "contains",
+              "value": "description: Run a pre-verdict adversarial probe pass"
+            },
+            {
+              "type": "contains",
+              "value": "# Adversarial Review"
+            },
+            {
+              "type": "contains",
+              "value": "## Trigger"
+            },
+            {
+              "type": "contains",
+              "value": "git rev-parse HEAD"
+            },
+            {
+              "type": "javascript",
+              "value": "output.length > 2000"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 0,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "skill": "adversarial-review"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "## Probe catalogue"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Isolated-import probe"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Revert-probe new tests"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Linked-worktree"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Non-UTF8 and FIFO"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Env-strip"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Alias-form guard evasions"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Moved-code coverage"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Lone-file vendor"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Workspace-copy execution"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Dirty / sdist / foreign-HEAD builds"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Prog-name-un-normalized diff"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Exit-status-discarding mutants"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Verbatim-doc run"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Digest-mutation check"
+              }
+            }
+          ]
+        },
+        "id": "213bd804-4f6e-410e-a325-b579ab8cf180",
+        "latencyMs": 177,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Emit the full text of the 'adversarial-review' skill (skills/adversarial-review/SKILL.md) verbatim, with no additions or commentary.",
+          "label": "evals/prompts/skill_surface.txt: Emit the full text of the '{{skill}}' skill (skills/{{skill}}/SKILL.md) verbatim, with no additions or commentary.",
+          "config": {}
+        },
+        "promptId": "2e2ee87c7059ca2333293941adabb93ece2d1c28937e32f03dba88a0caa42421",
+        "promptIdx": 0,
+        "provider": {
+          "id": "python:evals/providers/skill_provider.py:default",
+          "label": ""
+        },
+        "response": {
+          "output": "---\nname: adversarial-review\ndescription: Run a pre-verdict adversarial probe pass over a green-gated diff to catch the breakage that passing suites, read-only checks, and model-shaped repros miss.\n---\n\n# Adversarial Review\n\nAttack the diff as shipped before writing a verdict. A green suite is not evidence; only commands you ran, with exit codes and outputs, are evidence.\n\n## Trigger\n\nRun when the reviewer holds a green gate and is about to write APPROVE or NEEDS_FIXES. It runs after the conventional gate rerun and before the verdict. Freeze first: record head SHA, base SHA, and gate versions, and confirm `git rev-parse HEAD` equals the reviewed SHA.\n\n## Probe catalogue\n\nRoute the diff to rows by area, then run every routed row. Routing: docs/setup/install/help touched → Verbatim-doc + Prog-name-un-normalized rows; guard/subprocess/process-spawn code touched → Alias-form + Moved-code rows; packaging/build/embed/provenance touched → Dirty/sdist + Workspace-copy + Lone-file vendor rows; new tests added → Revert-probe row; file reads with encodings/paths/permissions → Non-UTF8 and FIFO row; env/config handling touched → Env-strip matrix row; dispatcher/CLI touched → Exit-status-discarding mutants row; digest/manifest touched → Digest-mutation row; probe/entry-script touched → Isolated-import row; worktree/history/refs touched → Linked-worktree row. Areas with no mapping default to running the row, never to skipping it. Each row lists what to run and what failure looks like. Ground each result in the named miss. Rows not run are listed as unrun, never assumed.\n\n- **Isolated-import probe (miss #75-1).** Run: execute each new or moved probe/entry script the way its caller does, under `python3 -I` (e.g. `python3 -I -c \"$PROBE\"`). Failure looks like: NameError, ImportError, or any crash in the first lines — especially names used but never imported.\n- **Revert-probe new tests (misses #75-1, #76-5).** Run: for each added test, revert the fix (or apply the obvious mutation) and show the test going red; one line per test. Failure looks like: a test that stays green with the fix reverted — substring checks, assertions that cannot fail, dispatcher mutants that change nothing.\n- **Linked-worktree / common-dir graft (miss #75-2).** Run: `git worktree add` a linked worktree, place graft data where Git actually reads it (the common dir, not `--git-dir`), and check the detector fires. Failure looks like: silence or a wrong notice when the graft lives in the common dir.\n- **Non-UTF8 and FIFO inputs (miss #75-2).** Run: feed a non-UTF8 byte in a comment line through the file reader, place a FIFO at the read path, and force an enumeration failure. Failure looks like: UnicodeDecodeError crash, a hang on the FIFO, or a silent pass on enumeration failure.\n- **Env-strip removal matrix (miss #75-4).** Run: delete each stripped variable (or config defense) one at a time and run the behavioral check, not just the dict-contents test; also remove each entry of any trial-copy/artifact list. Failure looks like: the suite stays green (or only a contents test fails) while behavior changes — forged reads return, lookups die.\n- **Alias-form guard evasions (miss #75-3).** Run: copy the scanned tree to a scratch directory (never the live head) and insert each canonical bypass the guard claims to forbid — aliased import (`import subprocess as sp`, `from subprocess import run as _run`), `os.execvp`/`posix_spawnp`, `asyncio.create_subprocess_exec`, a comment containing the guard token inside the call, an env-override (`{**safe_env(), \"KEY\": \"0\"}`), a raw call inside an exempt function, a raw call in a directory the guard does not scan (discover the scan scope from the guard's path list first; the Moved-code row covers new paths). Then invoke the guard exactly as its suite does (same test command or entrypoint). Failure looks like: the guard exits 0 / reports pass on any inserted bypass — \"fires\" means a nonzero exit or an explicit violation naming the inserted site.\n- **Moved-code coverage (misses #76-1, #76-8).** Run: list files the diff moved or added and check every scanner, digest, copy-list, hook, and doc reference still covers the new path; insert a raw forbidden call at the new path. Failure looks like: guard, digest, or hook blind to the new location.\n- **Lone-file vendor (misses #75-5, #76-6).** Run: copy the documented file set alone to an empty directory, per the reuse docs, and run every subcommand including `--help`. Failure looks like: ModuleNotFoundError or any crash the checkout hides via tree-preferring shims.\n- **Workspace-copy execution (miss #76-2).** Run: build the real workdir/workspace artifact and execute the copied tools inside it (not `python tools/*.py` in the checkout). Failure looks like: ModuleNotFoundError or nonzero exit where the checkout run exits 0.\n- **Dirty / sdist / foreign-HEAD builds (miss #76-3).** Run: build from a dirty tree, from an sdist or `git archive` tree, and with the target pointed at a different repo; assert the embedded commit equals `git rev-parse HEAD` of the built source. Failure looks like: a wrong, stale, `unknown`, or null commit reported as embedded, or a hex-format check passing on the wrong repo's commit.\n- **Prog-name-un-normalized diff (miss #76-4).** Run: diff help/usage output against real dispatch names with no prog-name or whitespace normalization. Failure looks like: usage strings naming commands that do not exist, or overview text on wrong streams/exit codes.\n- **Exit-status-discarding mutants (miss #76-5).** Run: apply dispatcher mutants — drop a branch, swap two areas, return 0 on no args, discard a failing subcommand's exit status — and run the suite plus a failing case end to end. Failure looks like: suite green while a failing case exits 0.\n- **Verbatim-doc run (miss #76-7).** Run: paste setup/install/help commands exactly as documented into a clean environment (correct interpreter, fresh venv, literal placeholders resolved only as a user would). Failure looks like: `command not found`, backend-unavailable errors, POSIX-only commands on a listed-supported platform, or any workaround the trial needed but did not report.\n- **Digest-mutation check (miss #76-8).** Run: edit each path family the digest claims to cover and confirm the recorded digest changes. Failure looks like: an edit with no digest change — an uncovered path.\n\n## Refutation pass\n\nRun the refutation in a fresh context of the same agent, given only the raw artifacts plus findings and no verdict. Each finding gets one refute attempt with a logged command. Unrefuted findings ship; refuted ones are struck with the refutation evidence kept. Symmetrically, refute every APPROVE-critical claim (\"guard passes unmodified\", \"trial PASS\", \"byte-identical\"): determinism is not correctness, a hand-run is not coverage, and a doc sentence is not behavior. Report template: frozen head/base SHAs; per catalogue row: run or unrun + command + exit code; findings with location, impact, repro evidence, and suggested resolution; the `Revision rounds` value.\n\n## Verdict rules\n\nFindings carry location, impact, repro evidence, and suggested resolution. APPROVE requires zero unrefuted blockers and states `Revision rounds: 0/3`. Any artifact edit after a passing verification invalidates that result for the changed version. List unrun catalogue rows as unrun; never treat a green suite, an implementer claim, or a normalized comparison as a run probe.\n",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "adversarial-review probe catalogue rows",
+          "vars": {
+            "skill": "adversarial-review"
+          },
+          "assert": [
+            {
+              "type": "contains",
+              "value": "## Probe catalogue"
+            },
+            {
+              "type": "contains",
+              "value": "Isolated-import probe"
+            },
+            {
+              "type": "contains",
+              "value": "Revert-probe new tests"
+            },
+            {
+              "type": "contains",
+              "value": "Linked-worktree"
+            },
+            {
+              "type": "contains",
+              "value": "Non-UTF8 and FIFO"
+            },
+            {
+              "type": "contains",
+              "value": "Env-strip"
+            },
+            {
+              "type": "contains",
+              "value": "Alias-form guard evasions"
+            },
+            {
+              "type": "contains",
+              "value": "Moved-code coverage"
+            },
+            {
+              "type": "contains",
+              "value": "Lone-file vendor"
+            },
+            {
+              "type": "contains",
+              "value": "Workspace-copy execution"
+            },
+            {
+              "type": "contains",
+              "value": "Dirty / sdist / foreign-HEAD builds"
+            },
+            {
+              "type": "contains",
+              "value": "Prog-name-un-normalized diff"
+            },
+            {
+              "type": "contains",
+              "value": "Exit-status-discarding mutants"
+            },
+            {
+              "type": "contains",
+              "value": "Verbatim-doc run"
+            },
+            {
+              "type": "contains",
+              "value": "Digest-mutation check"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 1,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "skill": "adversarial-review"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "## Refutation pass"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "## Verdict rules"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Revision rounds: 0/3"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "never treat a green suite"
+              }
+            }
+          ]
+        },
+        "id": "c96a8c0b-a26a-438c-b11c-58d60a923739",
+        "latencyMs": 177,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Emit the full text of the 'adversarial-review' skill (skills/adversarial-review/SKILL.md) verbatim, with no additions or commentary.",
+          "label": "evals/prompts/skill_surface.txt: Emit the full text of the '{{skill}}' skill (skills/{{skill}}/SKILL.md) verbatim, with no additions or commentary.",
+          "config": {}
+        },
+        "promptId": "2e2ee87c7059ca2333293941adabb93ece2d1c28937e32f03dba88a0caa42421",
+        "promptIdx": 0,
+        "provider": {
+          "id": "python:evals/providers/skill_provider.py:default",
+          "label": ""
+        },
+        "response": {
+          "output": "---\nname: adversarial-review\ndescription: Run a pre-verdict adversarial probe pass over a green-gated diff to catch the breakage that passing suites, read-only checks, and model-shaped repros miss.\n---\n\n# Adversarial Review\n\nAttack the diff as shipped before writing a verdict. A green suite is not evidence; only commands you ran, with exit codes and outputs, are evidence.\n\n## Trigger\n\nRun when the reviewer holds a green gate and is about to write APPROVE or NEEDS_FIXES. It runs after the conventional gate rerun and before the verdict. Freeze first: record head SHA, base SHA, and gate versions, and confirm `git rev-parse HEAD` equals the reviewed SHA.\n\n## Probe catalogue\n\nRoute the diff to rows by area, then run every routed row. Routing: docs/setup/install/help touched → Verbatim-doc + Prog-name-un-normalized rows; guard/subprocess/process-spawn code touched → Alias-form + Moved-code rows; packaging/build/embed/provenance touched → Dirty/sdist + Workspace-copy + Lone-file vendor rows; new tests added → Revert-probe row; file reads with encodings/paths/permissions → Non-UTF8 and FIFO row; env/config handling touched → Env-strip matrix row; dispatcher/CLI touched → Exit-status-discarding mutants row; digest/manifest touched → Digest-mutation row; probe/entry-script touched → Isolated-import row; worktree/history/refs touched → Linked-worktree row. Areas with no mapping default to running the row, never to skipping it. Each row lists what to run and what failure looks like. Ground each result in the named miss. Rows not run are listed as unrun, never assumed.\n\n- **Isolated-import probe (miss #75-1).** Run: execute each new or moved probe/entry script the way its caller does, under `python3 -I` (e.g. `python3 -I -c \"$PROBE\"`). Failure looks like: NameError, ImportError, or any crash in the first lines — especially names used but never imported.\n- **Revert-probe new tests (misses #75-1, #76-5).** Run: for each added test, revert the fix (or apply the obvious mutation) and show the test going red; one line per test. Failure looks like: a test that stays green with the fix reverted — substring checks, assertions that cannot fail, dispatcher mutants that change nothing.\n- **Linked-worktree / common-dir graft (miss #75-2).** Run: `git worktree add` a linked worktree, place graft data where Git actually reads it (the common dir, not `--git-dir`), and check the detector fires. Failure looks like: silence or a wrong notice when the graft lives in the common dir.\n- **Non-UTF8 and FIFO inputs (miss #75-2).** Run: feed a non-UTF8 byte in a comment line through the file reader, place a FIFO at the read path, and force an enumeration failure. Failure looks like: UnicodeDecodeError crash, a hang on the FIFO, or a silent pass on enumeration failure.\n- **Env-strip removal matrix (miss #75-4).** Run: delete each stripped variable (or config defense) one at a time and run the behavioral check, not just the dict-contents test; also remove each entry of any trial-copy/artifact list. Failure looks like: the suite stays green (or only a contents test fails) while behavior changes — forged reads return, lookups die.\n- **Alias-form guard evasions (miss #75-3).** Run: copy the scanned tree to a scratch directory (never the live head) and insert each canonical bypass the guard claims to forbid — aliased import (`import subprocess as sp`, `from subprocess import run as _run`), `os.execvp`/`posix_spawnp`, `asyncio.create_subprocess_exec`, a comment containing the guard token inside the call, an env-override (`{**safe_env(), \"KEY\": \"0\"}`), a raw call inside an exempt function, a raw call in a directory the guard does not scan (discover the scan scope from the guard's path list first; the Moved-code row covers new paths). Then invoke the guard exactly as its suite does (same test command or entrypoint). Failure looks like: the guard exits 0 / reports pass on any inserted bypass — \"fires\" means a nonzero exit or an explicit violation naming the inserted site.\n- **Moved-code coverage (misses #76-1, #76-8).** Run: list files the diff moved or added and check every scanner, digest, copy-list, hook, and doc reference still covers the new path; insert a raw forbidden call at the new path. Failure looks like: guard, digest, or hook blind to the new location.\n- **Lone-file vendor (misses #75-5, #76-6).** Run: copy the documented file set alone to an empty directory, per the reuse docs, and run every subcommand including `--help`. Failure looks like: ModuleNotFoundError or any crash the checkout hides via tree-preferring shims.\n- **Workspace-copy execution (miss #76-2).** Run: build the real workdir/workspace artifact and execute the copied tools inside it (not `python tools/*.py` in the checkout). Failure looks like: ModuleNotFoundError or nonzero exit where the checkout run exits 0.\n- **Dirty / sdist / foreign-HEAD builds (miss #76-3).** Run: build from a dirty tree, from an sdist or `git archive` tree, and with the target pointed at a different repo; assert the embedded commit equals `git rev-parse HEAD` of the built source. Failure looks like: a wrong, stale, `unknown`, or null commit reported as embedded, or a hex-format check passing on the wrong repo's commit.\n- **Prog-name-un-normalized diff (miss #76-4).** Run: diff help/usage output against real dispatch names with no prog-name or whitespace normalization. Failure looks like: usage strings naming commands that do not exist, or overview text on wrong streams/exit codes.\n- **Exit-status-discarding mutants (miss #76-5).** Run: apply dispatcher mutants — drop a branch, swap two areas, return 0 on no args, discard a failing subcommand's exit status — and run the suite plus a failing case end to end. Failure looks like: suite green while a failing case exits 0.\n- **Verbatim-doc run (miss #76-7).** Run: paste setup/install/help commands exactly as documented into a clean environment (correct interpreter, fresh venv, literal placeholders resolved only as a user would). Failure looks like: `command not found`, backend-unavailable errors, POSIX-only commands on a listed-supported platform, or any workaround the trial needed but did not report.\n- **Digest-mutation check (miss #76-8).** Run: edit each path family the digest claims to cover and confirm the recorded digest changes. Failure looks like: an edit with no digest change — an uncovered path.\n\n## Refutation pass\n\nRun the refutation in a fresh context of the same agent, given only the raw artifacts plus findings and no verdict. Each finding gets one refute attempt with a logged command. Unrefuted findings ship; refuted ones are struck with the refutation evidence kept. Symmetrically, refute every APPROVE-critical claim (\"guard passes unmodified\", \"trial PASS\", \"byte-identical\"): determinism is not correctness, a hand-run is not coverage, and a doc sentence is not behavior. Report template: frozen head/base SHAs; per catalogue row: run or unrun + command + exit code; findings with location, impact, repro evidence, and suggested resolution; the `Revision rounds` value.\n\n## Verdict rules\n\nFindings carry location, impact, repro evidence, and suggested resolution. APPROVE requires zero unrefuted blockers and states `Revision rounds: 0/3`. Any artifact edit after a passing verification invalidates that result for the changed version. List unrun catalogue rows as unrun; never treat a green suite, an implementer claim, or a normalized comparison as a run probe.\n",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "adversarial-review refutation pass and verdict rules",
+          "vars": {
+            "skill": "adversarial-review"
+          },
+          "assert": [
+            {
+              "type": "contains",
+              "value": "## Refutation pass"
+            },
+            {
+              "type": "contains",
+              "value": "## Verdict rules"
+            },
+            {
+              "type": "contains",
+              "value": "Revision rounds: 0/3"
+            },
+            {
+              "type": "contains",
+              "value": "never treat a green suite"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 2,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "skill": "adversarial-review"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "name: fix-verification"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "description: Verify a fix batch"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "# Fix Verification"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "## Trigger"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "git rev-parse HEAD"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "javascript",
+                "value": "output.length > 2000"
+              }
+            }
+          ]
+        },
+        "id": "ad0731ed-4c36-4c6c-b7e5-73abb9c2133b",
+        "latencyMs": 177,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Emit the full text of the 'fix-verification' skill (skills/fix-verification/SKILL.md) verbatim, with no additions or commentary.",
+          "label": "evals/prompts/skill_surface.txt: Emit the full text of the '{{skill}}' skill (skills/{{skill}}/SKILL.md) verbatim, with no additions or commentary.",
+          "config": {}
+        },
+        "promptId": "2e2ee87c7059ca2333293941adabb93ece2d1c28937e32f03dba88a0caa42421",
+        "promptIdx": 0,
+        "provider": {
+          "id": "python:evals/providers/skill_provider.py:default",
+          "label": ""
+        },
+        "response": {
+          "output": "---\nname: fix-verification\ndescription: Verify a fix batch against every prior review finding with per-row repro evidence on the final head, and close or carry each row explicitly.\n---\n\n# Fix Verification\n\nClose out a fix batch against the findings it claims to fix. A fix is verified only when each finding has its own row, its own hunks, and its own re-run evidence on the final head.\n\n## Trigger\n\nRun when a fixer pushes a fix batch addressing review findings, including after rebases of stacked branches. Do not run on a pre-fix head, and do not reuse evidence from a pre-rebase head after the base moves.\n\n## 1. Build the traceability table\n\nBuild one table row per prior finding, plus one row per nit explicitly accepted as-is. Each row carries: finding id, severity, the exact failing repro command, the claimed fix (commit + hunks), the re-run result on the final head, and the verdict (closed or carried).\n\nRecord the head under test first: `git rev-parse HEAD` output pasted in the report. Evidence from any other SHA does not close a row.\n\n## 2. Diff-to-row mapping\n\nCite the exact hunks (file + line range + commit) that close each row. A row with no cited hunks stays open, even if the surrounding code looks fixed — an unmapped claim is not a fix.\n\n## 3. Re-run each repro on the final head\n\nFor every row, run the original failing command first, then the new regression test, both on the final head. Paste the exact command, exit code, and relevant output for each. If a prior finding carries no failing repro command, write one from the finding text and run it before the row can close — a row without a repro never closes as \"verified\". A green test suite never substitutes for a per-row repro. Example (FEL instance): a full suite passed while the preflight probe still crashed with `NameError: name 'sys' is not defined` because the only covering test was a substring check and the live path was mocked, so suite-green is not row evidence.\n\nMark implementer- or trial-supplied results as untrusted until you personally re-run them. \"TRIAL.md: PASS\" was once corroborated non-literally (own venvs, remapped placeholders) while the documented commands failed verbatim (`fel: command not found`); re-run means the documented command as written.\n\n## 4. Rebase and stack re-verification\n\nIf the branch was rebased or its base moved, redo steps 2–3 on the new head from scratch. Check explicitly that fixes to a pre-rebase path were ported to the post-rebase path. Example (FEL instance): fixes to `tools/fel.py` had to be re-applied in `src/fel_ledger/fel.py` after the rebase, and an unported fix is a silently dropped fix. List each ported fix with its new hunks, or carry the row as lost.\n\n## 5. Status-field consistency\n\nRe-verify every artifact-emitted status value against reality in full — embedded/provenance flags, content digests, help/usage strings executed verbatim with prog names intact; a status field that contradicts the artifact is its own finding. Example (FEL instance): no `embedded: True` alongside a null or `unknown` commit (a dirty-tree build reported HEAD correctly-bytes but wrong-by-content, and sdist builds wrote `fel_commit: null` while claiming embedded); normalizing prog names hid `usage: fel lookup` for a command typed `fel handoff lookup`. PR-body numbers and scope ranges are spot-checked only (two entries); a full body audit belongs to the author pre-publish checklist, not to fix closeout. Example (FEL instance): wheel byte counts 53,133 vs 53,125 were both wrong, and a scope range of `tools/fel.py:1-30` cited a 27-line file.\n\n## 6. Update the revision counter\n\nIncrement `Revision rounds: N/3` before each recheck batch. The initial review is not a round; at most three fix-and-recheck rounds follow. After 3/3 with blockers remaining, stop and request a human decision — there is no fourth fix batch.\n\nAny edit after a passing verification invalidates that verification for the changed rows; re-run them.\n\n## 7. Close or carry\n\nClose a row only with evidence links: the cited hunks plus the pasted re-run output on the final head. Carry every other row with its finding, history, and custody intact — never silently park a row, and never close one on \"suite green\", \"byte-identical rebuild\", or \"trial PASS\" language alone (both phrases previously coexisted with live blockers).\n\nReturn the traceability table with per-row verdicts, the final head SHA, the `Revision rounds: N/3` value, and the list of carried rows with owners.\n",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "fix-verification frontmatter and trigger section",
+          "vars": {
+            "skill": "fix-verification"
+          },
+          "assert": [
+            {
+              "type": "contains",
+              "value": "name: fix-verification"
+            },
+            {
+              "type": "contains",
+              "value": "description: Verify a fix batch"
+            },
+            {
+              "type": "contains",
+              "value": "# Fix Verification"
+            },
+            {
+              "type": "contains",
+              "value": "## Trigger"
+            },
+            {
+              "type": "contains",
+              "value": "git rev-parse HEAD"
+            },
+            {
+              "type": "javascript",
+              "value": "output.length > 2000"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 3,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "skill": "fix-verification"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Build the traceability table"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Diff-to-row mapping"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Re-run each repro on the final head"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Rebase and stack re-verification"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Status-field consistency"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Update the revision counter"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Revision rounds: N/3"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "Close or carry"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "never silently park a row"
+              }
+            }
+          ]
+        },
+        "id": "481a5ce9-3d91-4baf-9afb-f54957d91f4e",
+        "latencyMs": 106,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Emit the full text of the 'fix-verification' skill (skills/fix-verification/SKILL.md) verbatim, with no additions or commentary.",
+          "label": "evals/prompts/skill_surface.txt: Emit the full text of the '{{skill}}' skill (skills/{{skill}}/SKILL.md) verbatim, with no additions or commentary.",
+          "config": {}
+        },
+        "promptId": "2e2ee87c7059ca2333293941adabb93ece2d1c28937e32f03dba88a0caa42421",
+        "promptIdx": 0,
+        "provider": {
+          "id": "python:evals/providers/skill_provider.py:default",
+          "label": ""
+        },
+        "response": {
+          "output": "---\nname: fix-verification\ndescription: Verify a fix batch against every prior review finding with per-row repro evidence on the final head, and close or carry each row explicitly.\n---\n\n# Fix Verification\n\nClose out a fix batch against the findings it claims to fix. A fix is verified only when each finding has its own row, its own hunks, and its own re-run evidence on the final head.\n\n## Trigger\n\nRun when a fixer pushes a fix batch addressing review findings, including after rebases of stacked branches. Do not run on a pre-fix head, and do not reuse evidence from a pre-rebase head after the base moves.\n\n## 1. Build the traceability table\n\nBuild one table row per prior finding, plus one row per nit explicitly accepted as-is. Each row carries: finding id, severity, the exact failing repro command, the claimed fix (commit + hunks), the re-run result on the final head, and the verdict (closed or carried).\n\nRecord the head under test first: `git rev-parse HEAD` output pasted in the report. Evidence from any other SHA does not close a row.\n\n## 2. Diff-to-row mapping\n\nCite the exact hunks (file + line range + commit) that close each row. A row with no cited hunks stays open, even if the surrounding code looks fixed — an unmapped claim is not a fix.\n\n## 3. Re-run each repro on the final head\n\nFor every row, run the original failing command first, then the new regression test, both on the final head. Paste the exact command, exit code, and relevant output for each. If a prior finding carries no failing repro command, write one from the finding text and run it before the row can close — a row without a repro never closes as \"verified\". A green test suite never substitutes for a per-row repro. Example (FEL instance): a full suite passed while the preflight probe still crashed with `NameError: name 'sys' is not defined` because the only covering test was a substring check and the live path was mocked, so suite-green is not row evidence.\n\nMark implementer- or trial-supplied results as untrusted until you personally re-run them. \"TRIAL.md: PASS\" was once corroborated non-literally (own venvs, remapped placeholders) while the documented commands failed verbatim (`fel: command not found`); re-run means the documented command as written.\n\n## 4. Rebase and stack re-verification\n\nIf the branch was rebased or its base moved, redo steps 2–3 on the new head from scratch. Check explicitly that fixes to a pre-rebase path were ported to the post-rebase path. Example (FEL instance): fixes to `tools/fel.py` had to be re-applied in `src/fel_ledger/fel.py` after the rebase, and an unported fix is a silently dropped fix. List each ported fix with its new hunks, or carry the row as lost.\n\n## 5. Status-field consistency\n\nRe-verify every artifact-emitted status value against reality in full — embedded/provenance flags, content digests, help/usage strings executed verbatim with prog names intact; a status field that contradicts the artifact is its own finding. Example (FEL instance): no `embedded: True` alongside a null or `unknown` commit (a dirty-tree build reported HEAD correctly-bytes but wrong-by-content, and sdist builds wrote `fel_commit: null` while claiming embedded); normalizing prog names hid `usage: fel lookup` for a command typed `fel handoff lookup`. PR-body numbers and scope ranges are spot-checked only (two entries); a full body audit belongs to the author pre-publish checklist, not to fix closeout. Example (FEL instance): wheel byte counts 53,133 vs 53,125 were both wrong, and a scope range of `tools/fel.py:1-30` cited a 27-line file.\n\n## 6. Update the revision counter\n\nIncrement `Revision rounds: N/3` before each recheck batch. The initial review is not a round; at most three fix-and-recheck rounds follow. After 3/3 with blockers remaining, stop and request a human decision — there is no fourth fix batch.\n\nAny edit after a passing verification invalidates that verification for the changed rows; re-run them.\n\n## 7. Close or carry\n\nClose a row only with evidence links: the cited hunks plus the pasted re-run output on the final head. Carry every other row with its finding, history, and custody intact — never silently park a row, and never close one on \"suite green\", \"byte-identical rebuild\", or \"trial PASS\" language alone (both phrases previously coexisted with live blockers).\n\nReturn the traceability table with per-row verdicts, the final head SHA, the `Revision rounds: N/3` value, and the list of carried rows with owners.\n",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "fix-verification traceability and closeout steps",
+          "vars": {
+            "skill": "fix-verification"
+          },
+          "assert": [
+            {
+              "type": "contains",
+              "value": "Build the traceability table"
+            },
+            {
+              "type": "contains",
+              "value": "Diff-to-row mapping"
+            },
+            {
+              "type": "contains",
+              "value": "Re-run each repro on the final head"
+            },
+            {
+              "type": "contains",
+              "value": "Rebase and stack re-verification"
+            },
+            {
+              "type": "contains",
+              "value": "Status-field consistency"
+            },
+            {
+              "type": "contains",
+              "value": "Update the revision counter"
+            },
+            {
+              "type": "contains",
+              "value": "Revision rounds: N/3"
+            },
+            {
+              "type": "contains",
+              "value": "Close or carry"
+            },
+            {
+              "type": "contains",
+              "value": "never silently park a row"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 4,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "skill": "fix-verification"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      },
+      {
+        "cost": 0,
+        "gradingResult": {
+          "pass": true,
+          "score": 1,
+          "reason": "All assertions passed",
+          "namedScores": {},
+          "tokensUsed": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0
+          },
+          "componentResults": [
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "skills/adversarial-review/SKILL.md"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "contains",
+                "value": "skills/fix-verification/SKILL.md"
+              }
+            },
+            {
+              "pass": true,
+              "score": 1,
+              "reason": "Assertion passed",
+              "assertion": {
+                "type": "javascript",
+                "value": "output.trim().split('\\n').length === 3"
+              }
+            }
+          ]
+        },
+        "id": "baf56215-cb6c-4e9a-823a-58c5d716739f",
+        "latencyMs": 106,
+        "namedScores": {},
+        "prompt": {
+          "raw": "Emit the full text of the 'adversarial-review' skill (skills/adversarial-review/SKILL.md) verbatim, with no additions or commentary.",
+          "label": "evals/prompts/skill_surface.txt: Emit the full text of the '{{skill}}' skill (skills/{{skill}}/SKILL.md) verbatim, with no additions or commentary.",
+          "config": {}
+        },
+        "promptId": "2e2ee87c7059ca2333293941adabb93ece2d1c28937e32f03dba88a0caa42421",
+        "promptIdx": 0,
+        "provider": {
+          "id": "python:evals/providers/skill_provider.py:default",
+          "label": ""
+        },
+        "response": {
+          "output": "SKILL_FILES:\nskills/adversarial-review/SKILL.md\nskills/fix-verification/SKILL.md",
+          "cached": false
+        },
+        "score": 1,
+        "success": true,
+        "testCase": {
+          "description": "skills layout is exactly one SKILL.md per skill",
+          "vars": {
+            "skill": "adversarial-review"
+          },
+          "provider": {
+            "id": "python:evals/providers/layout_provider.py:default",
+            "label": "",
+            "config": {
+              "basePath": ""
+            }
+          },
+          "assert": [
+            {
+              "type": "contains",
+              "value": "skills/adversarial-review/SKILL.md"
+            },
+            {
+              "type": "contains",
+              "value": "skills/fix-verification/SKILL.md"
+            },
+            {
+              "type": "javascript",
+              "value": "output.trim().split('\\n').length === 3"
+            }
+          ],
+          "options": {},
+          "metadata": {}
+        },
+        "testIdx": 5,
+        "tokenUsage": {
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "total": 0,
+          "numRequests": 1,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          },
+          "assertions": {
+            "total": 0,
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "numRequests": 0,
+            "completionDetails": {
+              "reasoning": 0,
+              "acceptedPrediction": 0,
+              "rejectedPrediction": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            }
+          }
+        },
+        "vars": {
+          "skill": "adversarial-review"
+        },
+        "metadata": {
+          "_promptfooFileMetadata": {}
+        },
+        "failureReason": 0
+      }
+    ],
+    "stats": {
+      "successes": 6,
+      "failures": 0,
+      "errors": 0,
+      "tokenUsage": {
+        "prompt": 0,
+        "completion": 0,
+        "cached": 0,
+        "total": 0,
+        "numRequests": 6,
+        "completionDetails": {
+          "reasoning": 0,
+          "acceptedPrediction": 0,
+          "rejectedPrediction": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "assertions": {
+          "total": 0,
+          "prompt": 0,
+          "completion": 0,
+          "cached": 0,
+          "numRequests": 0,
+          "completionDetails": {
+            "reasoning": 0,
+            "acceptedPrediction": 0,
+            "rejectedPrediction": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        }
+      },
+      "durationMs": 306,
+      "evaluationDurationMs": 306
+    }
+  },
+  "config": {
+    "description": "muse-skills baseline evals (offline, deterministic)",
+    "prompts": [
+      "file://evals/prompts/skill_surface.txt"
+    ],
+    "providers": [
+      "file://evals/providers/skill_provider.py"
+    ],
+    "tests": [
+      {
+        "description": "adversarial-review frontmatter and trigger section",
+        "vars": {
+          "skill": "adversarial-review"
+        },
+        "assert": [
+          {
+            "type": "contains",
+            "value": "name: adversarial-review"
+          },
+          {
+            "type": "contains",
+            "value": "description: Run a pre-verdict adversarial probe pass"
+          },
+          {
+            "type": "contains",
+            "value": "# Adversarial Review"
+          },
+          {
+            "type": "contains",
+            "value": "## Trigger"
+          },
+          {
+            "type": "contains",
+            "value": "git rev-parse HEAD"
+          },
+          {
+            "type": "javascript",
+            "value": "output.length > 2000"
+          }
+        ]
+      },
+      {
+        "description": "adversarial-review probe catalogue rows",
+        "vars": {
+          "skill": "adversarial-review"
+        },
+        "assert": [
+          {
+            "type": "contains",
+            "value": "## Probe catalogue"
+          },
+          {
+            "type": "contains",
+            "value": "Isolated-import probe"
+          },
+          {
+            "type": "contains",
+            "value": "Revert-probe new tests"
+          },
+          {
+            "type": "contains",
+            "value": "Linked-worktree"
+          },
+          {
+            "type": "contains",
+            "value": "Non-UTF8 and FIFO"
+          },
+          {
+            "type": "contains",
+            "value": "Env-strip"
+          },
+          {
+            "type": "contains",
+            "value": "Alias-form guard evasions"
+          },
+          {
+            "type": "contains",
+            "value": "Moved-code coverage"
+          },
+          {
+            "type": "contains",
+            "value": "Lone-file vendor"
+          },
+          {
+            "type": "contains",
+            "value": "Workspace-copy execution"
+          },
+          {
+            "type": "contains",
+            "value": "Dirty / sdist / foreign-HEAD builds"
+          },
+          {
+            "type": "contains",
+            "value": "Prog-name-un-normalized diff"
+          },
+          {
+            "type": "contains",
+            "value": "Exit-status-discarding mutants"
+          },
+          {
+            "type": "contains",
+            "value": "Verbatim-doc run"
+          },
+          {
+            "type": "contains",
+            "value": "Digest-mutation check"
+          }
+        ]
+      },
+      {
+        "description": "adversarial-review refutation pass and verdict rules",
+        "vars": {
+          "skill": "adversarial-review"
+        },
+        "assert": [
+          {
+            "type": "contains",
+            "value": "## Refutation pass"
+          },
+          {
+            "type": "contains",
+            "value": "## Verdict rules"
+          },
+          {
+            "type": "contains",
+            "value": "Revision rounds: 0/3"
+          },
+          {
+            "type": "contains",
+            "value": "never treat a green suite"
+          }
+        ]
+      },
+      {
+        "description": "fix-verification frontmatter and trigger section",
+        "vars": {
+          "skill": "fix-verification"
+        },
+        "assert": [
+          {
+            "type": "contains",
+            "value": "name: fix-verification"
+          },
+          {
+            "type": "contains",
+            "value": "description: Verify a fix batch"
+          },
+          {
+            "type": "contains",
+            "value": "# Fix Verification"
+          },
+          {
+            "type": "contains",
+            "value": "## Trigger"
+          },
+          {
+            "type": "contains",
+            "value": "git rev-parse HEAD"
+          },
+          {
+            "type": "javascript",
+            "value": "output.length > 2000"
+          }
+        ]
+      },
+      {
+        "description": "fix-verification traceability and closeout steps",
+        "vars": {
+          "skill": "fix-verification"
+        },
+        "assert": [
+          {
+            "type": "contains",
+            "value": "Build the traceability table"
+          },
+          {
+            "type": "contains",
+            "value": "Diff-to-row mapping"
+          },
+          {
+            "type": "contains",
+            "value": "Re-run each repro on the final head"
+          },
+          {
+            "type": "contains",
+            "value": "Rebase and stack re-verification"
+          },
+          {
+            "type": "contains",
+            "value": "Status-field consistency"
+          },
+          {
+            "type": "contains",
+            "value": "Update the revision counter"
+          },
+          {
+            "type": "contains",
+            "value": "Revision rounds: N/3"
+          },
+          {
+            "type": "contains",
+            "value": "Close or carry"
+          },
+          {
+            "type": "contains",
+            "value": "never silently park a row"
+          }
+        ]
+      },
+      {
+        "description": "skills layout is exactly one SKILL.md per skill",
+        "vars": {
+          "skill": "adversarial-review"
+        },
+        "provider": "file://evals/providers/layout_provider.py",
+        "assert": [
+          {
+            "type": "contains",
+            "value": "skills/adversarial-review/SKILL.md"
+          },
+          {
+            "type": "contains",
+            "value": "skills/fix-verification/SKILL.md"
+          },
+          {
+            "type": "javascript",
+            "value": "output.trim().split('\\n').length === 3"
+          }
+        ]
+      }
+    ],
+    "outputPath": [
+      "evals/results/baseline-2026-09-11.json"
+    ],
+    "extensions": []
+  },
+  "shareableUrl": null,
+  "metadata": {
+    "promptfooVersion": "0.123.0",
+    "nodeVersion": "v26.7.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "exportedAt": "2026-09-11T21:04:46.913Z",
+    "evaluationCreatedAt": "2026-09-11T21:04:46.516Z"
+  },
+  "vars": [
+    "skill"
+  ],
+  "runtimeOptions": {
+    "eventSource": "cli",
+    "showProgressBar": false,
+    "repeat": 1,
+    "maxConcurrency": 4,
+    "cache": true
+  }
+}

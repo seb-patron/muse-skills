@@ -28,6 +28,19 @@ muse skills install muse-skills/skills/fix-verification --scope user
 Then invoke by name (`adversarial-review`, `fix-verification`) or let the
 session load them when a review/fix round starts.
 
+## Evals
+
+Offline promptfoo baselines pin each skill's surface (probe rows, verdict
+rules, closeout steps, repo layout). No model calls, no network:
+
+```sh
+npm install
+npm run eval:baseline
+```
+
+See [evals/BASELINE.md](evals/BASELINE.md) for coverage and the committed
+results under `evals/results/`.
+
 ## Contributing
 
 `main` is protected: all changes land via pull request with one approval
