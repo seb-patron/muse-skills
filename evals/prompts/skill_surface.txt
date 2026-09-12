@@ -1,1 +1,0 @@
-Emit the full text of the '{{skill}}' skill (skills/{{skill}}/SKILL.md) verbatim, with no additions or commentary.

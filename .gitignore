@@ -1,5 +1,3 @@
 node_modules/
-.promptfoo/
 __pycache__/
-evals/results/*.json
-!evals/results/baseline-*.json
+.DS_Store

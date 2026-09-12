@@ -30,16 +30,15 @@ session load them when a review/fix round starts.
 
 ## Evals
 
-Offline promptfoo baselines pin each skill's surface (probe rows, verdict
-rules, closeout steps, repo layout). No model calls, no network:
+A dependency-free structural lint pins each skill's surface (frontmatter,
+all 14 probe catalogue rows, load-bearing rule clauses, one-SKILL.md-per-
+directory layout). Standard library only, enforced by CI on every PR:
 
 ```sh
-npm install
-npm run eval:baseline
+python3 evals/check_skills.py
 ```
 
-See [evals/BASELINE.md](evals/BASELINE.md) for coverage and the committed
-results under `evals/results/`.
+See [evals/README.md](evals/README.md) for the check list.
 
 ## Contributing
 
