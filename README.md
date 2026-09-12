@@ -28,11 +28,31 @@ muse skills install muse-skills/skills/fix-verification --scope user
 Then invoke by name (`adversarial-review`, `fix-verification`) or let the
 session load them when a review/fix round starts.
 
+## Structural validation
+
+The lint validates tracked skill roots, YAML metadata, the 14 probe identities,
+and selected instruction fragments. It uses a pinned PyYAML dependency; CI runs
+the lint and its regression tests on every PR. From the repository root:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r evals/requirements.txt
+.venv/bin/python evals/check_skills.py
+.venv/bin/python -m unittest discover -s evals -p 'test_*.py' -v
+```
+
+On Windows, use `.venv\Scripts\python.exe` instead of `.venv/bin/python`.
+This checks document structure and text presence; it does not execute Muse or
+establish that Muse loads or follows the skills correctly. See
+[evals/README.md](evals/README.md) for the contract and its limitations.
+
 ## Contributing
 
 `main` is protected: all changes land via pull request with one approval
-(stale reviews dismissed on push). Keep each skill to exactly one `SKILL.md`
-per directory, and validate before opening a PR:
+(stale reviews dismissed on push). Keep each skill's root document at
+`skills/<skill-id>/SKILL.md`; nested supporting files are allowed. Stage new
+skill files so the structural lint discovers them, run the gates above, and
+validate the skill with Muse before opening a PR:
 
 ```sh
 muse skills validate skills/<skill-id> --json

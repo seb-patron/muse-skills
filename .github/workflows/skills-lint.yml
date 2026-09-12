@@ -1,0 +1,24 @@
+name: skills-lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install lint dependency
+        run: python3 -m pip install -r evals/requirements.txt
+      - name: Checker regression tests
+        run: python3 -m unittest discover -s evals -p 'test_*.py' -v
+      - name: Structural lint for skill files
+        run: python3 evals/check_skills.py
