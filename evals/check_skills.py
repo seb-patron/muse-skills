@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
-"""Structural lint for skill files. Standard library only.
+"""Structural lint for tracked skill files; requires evals/requirements.txt.
 
-Exit 0 when every check passes, 1 otherwise. Each check searches within the
-section that owns the text, so a routing paragraph that merely names a probe
-cannot shadow a deleted catalogue row.
+Exit 0 when all applicable checks pass, 1 otherwise, reporting all failures
+that can be checked with the available inputs. Validate YAML metadata, exact
+probe identities, selected section-scoped text fragments, and skill roots.
+Nested supporting files and untracked drafts do not become skill roots.
 
-Checks:
-  1. Frontmatter: the leading YAML block parses; `name` equals the skill
-     directory name; `description` is present and non-empty (wording not pinned).
-  2. Probe catalogue (adversarial-review): the `## Probe catalogue` section
-     holds exactly 14 `- **...**` rows, each with its expected name.
-  3. Load-bearing rule clauses: each pinned clause is present inside its own
-     section (headings alone do not pass).
-  4. Layout: from `git ls-files skills/`, every tracked skill directory holds
-     a `SKILL.md`, and every listed `SKILL.md` exists on disk. Supporting
-     files are allowed, untracked files are ignored, and no total file count
-     is pinned, so new skills do not break the lint.
+This is text validation, not a Markdown semantic checker or a Muse run.
+Probe bodies and instruction meaning are not validated.
 
 Usage: python3 evals/check_skills.py  (run from anywhere; repo root is derived
 from this file's location)
@@ -24,12 +16,20 @@ from this file's location)
 import re
 import subprocess
 import sys
-from pathlib import Path
+from collections import Counter
+from pathlib import Path, PurePosixPath
+
+try:
+    import yaml
+except ModuleNotFoundError:
+    raise SystemExit(
+        "PyYAML is required; install with: "
+        "python3 -m pip install -r evals/requirements.txt"
+    ) from None
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SKILLS_DIR = REPO_ROOT / "skills"
 
-# Expected probe-row names, in catalogue order.
+# Expected identities; catalogue order is not part of the contract.
 EXPECTED_PROBE_ROWS = [
     "Isolated-import probe",
     "Revert-probe new tests",
@@ -75,21 +75,18 @@ EXPECTED_RULES = [
 ]
 
 
-def read_skill(skill):
-    path = SKILLS_DIR / skill / "SKILL.md"
-    return path.read_text(encoding="utf-8")
-
-
 def parse_frontmatter(text):
-    """Return the leading --- delimited block as a dict of key -> value."""
-    match = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    """Parse a leading --- block as a safe YAML mapping, or raise ValueError."""
+    match = re.match(r"\A---\r?\n(.*?)^---[ \t]*(?:\r?\n|\Z)",
+                     text, re.DOTALL | re.MULTILINE)
     if not match:
-        return None
-    fields = {}
-    for line in match.group(1).splitlines():
-        if ":" in line:
-            key, value = line.split(":", 1)
-            fields[key.strip()] = value.strip()
+        raise ValueError("missing leading --- delimited frontmatter")
+    try:
+        fields = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid YAML: {exc}") from exc
+    if not isinstance(fields, dict):
+        raise ValueError("frontmatter must be a YAML mapping")
     return fields
 
 
@@ -120,17 +117,28 @@ def probe_row_headers(catalogue_section):
     return headers
 
 
-def tracked_skill_files():
-    out = subprocess.run(
-        ["git", "ls-files", "-z", "skills/"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+def probe_identity(header):
+    """Accept an exact name, optionally followed by the known miss suffix."""
+    return re.sub(
+        r" \(miss(?:es)? #\d+-\d+(?:, #\d+-\d+)*\)\.$", "", header
     )
+
+
+def tracked_skill_files(repo_root):
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z", "--", "skills/"],
+            cwd=repo_root, capture_output=True, text=True,
+        )
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"cannot enumerate tracked skills: {exc}") from exc
     if out.returncode != 0:
-        return None
+        raise ValueError(f"git ls-files failed: {out.stderr.strip()}")
     return [p for p in out.stdout.split("\0") if p]
 
 
-def main():
+def main(repo_root=REPO_ROOT):
+    repo_root = Path(repo_root)
     failures = []
     passes = []
 
@@ -139,61 +147,79 @@ def main():
         print(f"{'ok' if ok else 'FAIL'}  {label}"
               + (f" — {detail}" if detail and not ok else ""))
 
-    skill_files = sorted(
-        p.relative_to(REPO_ROOT).as_posix()
-        for p in SKILLS_DIR.glob("*/SKILL.md")) if SKILLS_DIR.is_dir() else []
+    # Use the same Git-index discovery for both layout and content checks.
+    try:
+        tracked = set(tracked_skill_files(repo_root))
+    except ValueError as exc:
+        check("layout: git ls-files runs", False, str(exc))
+        print(f"\n{len(passes)} passed, {len(failures)} failed")
+        return 1
+    check("layout: git ls-files runs", True)
+    dirs = sorted({PurePosixPath(p).parts[1] for p in tracked
+                   if len(PurePosixPath(p).parts) >= 3})
+    check("layout: at least one skill directory", bool(dirs))
+    for skill in dirs:
+        rel = f"skills/{skill}/SKILL.md"
+        check(f"layout: skills/{skill}/ holds tracked SKILL.md", rel in tracked)
+    for skill in sorted({skill for skill, _, _ in EXPECTED_RULES}):
+        check(f"layout: required skill '{skill}' is tracked",
+              f"skills/{skill}/SKILL.md" in tracked)
+    for rel in sorted(tracked):
+        if PurePosixPath(rel).name == "SKILL.md":
+            check(f"layout: {rel} exists on disk", (repo_root / rel).is_file())
 
-    # 1. Frontmatter per skill file found on disk.
-    for rel in skill_files:
-        skill = rel.split("/")[1]
-        text = read_skill(skill)
-        fields = parse_frontmatter(text)
-        check(f"{skill}: frontmatter parses", fields is not None, rel)
-        if fields is None:
+    # Parse only tracked root SKILL.md files, reading current working-tree bytes.
+    texts = {}
+    for skill in dirs:
+        rel = f"skills/{skill}/SKILL.md"
+        path = repo_root / rel
+        if rel not in tracked or not path.is_file():
             continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            check(f"{skill}: SKILL.md readable as UTF-8", False, str(exc))
+            continue
+        texts[skill] = text
+        try:
+            fields = parse_frontmatter(text)
+        except ValueError as exc:
+            check(f"{skill}: frontmatter parses", False, str(exc))
+            continue
+        check(f"{skill}: frontmatter parses", True)
         check(f"{skill}: name == directory name",
-              fields.get("name") == skill,
+              isinstance(fields.get("name"), str) and fields["name"] == skill,
               f"name={fields.get('name')!r} dir={skill!r}")
         check(f"{skill}: description present and non-empty",
-              bool(fields.get("description")),
-              "description missing or empty")
+              isinstance(fields.get("description"), str)
+              and bool(fields["description"].strip()),
+              "description must be a nonblank YAML string")
 
-    # 2. Probe catalogue rows, counted inside their own section.
-    adv = read_skill("adversarial-review")
+    # Probe identities are section-scoped and must each occur exactly once.
+    adv = texts.get("adversarial-review", "")
     catalogue = section_text(adv, "Probe catalogue")
     check("adversarial-review: Probe catalogue section exists",
           catalogue is not None)
     if catalogue is not None:
         headers = probe_row_headers(catalogue)
+        identities = Counter(probe_identity(header) for header in headers)
         check("adversarial-review: exactly 14 probe rows",
               len(headers) == len(EXPECTED_PROBE_ROWS),
               f"found {len(headers)}")
         for name in EXPECTED_PROBE_ROWS:
             check(f"adversarial-review: probe row '{name}'",
-                  any(name in h for h in headers))
+                  identities[name] == 1,
+                  f"expected once, found {identities[name]}")
+        unexpected = sorted(set(identities) - set(EXPECTED_PROBE_ROWS))
+        check("adversarial-review: no unexpected probe identities",
+              not unexpected, repr(unexpected))
 
-    # 3. Load-bearing clauses inside their own sections.
-    texts = {"adversarial-review": adv,
-             "fix-verification": read_skill("fix-verification")}
+    # Text-presence assertions only; fold whitespace to allow line wrapping.
     for skill, heading, clause in EXPECTED_RULES:
-        body = section_text(texts[skill], heading)
+        body = section_text(texts.get(skill, ""), heading)
         check(f"{skill} [{heading}]: '{clause[:48]}...'",
-              body is not None and clause in body,
+              body is not None and " ".join(clause.split()) in " ".join(body.split()),
               "section missing" if body is None else "clause missing")
-
-    # 4. Layout from tracked files: one SKILL.md per skill dir, all on disk.
-    tracked = tracked_skill_files()
-    check("layout: git ls-files runs", tracked is not None)
-    if tracked is not None:
-        dirs = sorted({str(Path(p).parent) for p in tracked})
-        check("layout: at least one skill directory", len(dirs) > 0)
-        for d in dirs:
-            names = [Path(p).name for p in tracked if str(Path(p).parent) == d]
-            check(f"layout: {d}/ holds SKILL.md", "SKILL.md" in names)
-        for p in tracked:
-            if Path(p).name == "SKILL.md":
-                check(f"layout: {p} exists on disk",
-                      (REPO_ROOT / p).is_file())
 
     print(f"\n{len(passes)} passed, {len(failures)} failed")
     return 1 if failures else 0
