@@ -27,23 +27,25 @@
          so the claimed regression guard depends on a developer remembering to run it.
     resolved_findings: NONE. This is the defect-bearing historical head.
 
-- description: Historical PR 1 repaired structural-lint head
+- description: Historical PR 1 structural-lint head with trailing-header gap
   metadata:
-    case_id: pr1-repaired-structural-lint
+    case_id: pr1-structural-lint-header-gap
     source: https://github.com/seb-patron/muse-skills/pull/1
   vars:
     base_sha: c18a44d890183b95f4204e3a6805cee7e70d99d5
     head_sha: 33ebbdd0a9bc7a6d17ac8fac514784813d567594
     skill_name: adversarial-review
-    expected_verdict: APPROVE
+    expected_verdict: NEEDS_FIXES
     change_summary: >-
       Adds dependency-light structural validation and executable regression tests.
       It safely parses YAML, validates tracked skill roots and exact probe identities,
       pins selected section-scoped clauses, runs mutation-oriented unit tests in CI,
       and explicitly states that it is not a behavioral Muse evaluation.
-    gold_findings: >-
-      NONE. This is a resolved control for the five findings in the broken head;
-      the final independent re-review found no remaining actionable issue.
+    gold_findings: |
+      1. trailing-text-after-probe-header (should-fix): The catalogue parser accepts
+         arbitrary text after a valid closing `**`, so a malformed row header such
+         as `- **Isolated-import probe (miss #75-1).** trailing text` still passes the
+         exact probe-identity check.
     resolved_findings: |
       no-behavioral-run is not a defect here because this head explicitly describes the
       checker as structural validation rather than behavioral evaluation.

@@ -1,0 +1,96 @@
+description: Codex Luna and Sol references for Muse adversarial-review
+
+prompts:
+  - file://prompts/review.txt
+
+providers:
+  - id: file://providers/codex_provider.py
+    label: codex-luna-medium-control
+    config:
+      variant: none
+      model: gpt-5.6-luna
+      reasoning_effort: medium
+      timeout: 600000
+      timeout_seconds: 540
+  - id: file://providers/codex_provider.py
+    label: codex-luna-medium-current-skill
+    config:
+      variant: current
+      model: gpt-5.6-luna
+      reasoning_effort: medium
+      timeout: 600000
+      timeout_seconds: 540
+  - id: file://providers/codex_provider.py
+    label: codex-sol-high-control
+    config:
+      variant: none
+      model: gpt-5.6-sol
+      reasoning_effort: high
+      timeout: 600000
+      timeout_seconds: 540
+  - id: file://providers/codex_provider.py
+    label: codex-sol-high-current-skill
+    config:
+      variant: current
+      model: gpt-5.6-sol
+      reasoning_effort: high
+      timeout: 600000
+      timeout_seconds: 540
+
+defaultTest:
+  options:
+    disableVarExpansion: true
+    provider:
+      id: openai:codex-sdk:gpt-5.6-terra
+      config:
+        model_reasoning_effort: high
+        sandbox_mode: read-only
+        working_dir: ../..
+  assert:
+    - type: python
+      value: file://assertions/review_contract.py:assert_review_contract
+      metric: review_contract
+    - type: python
+      value: file://assertions/review_contract.py:assert_expected_verdict
+      metric: verdict
+    - type: python
+      value: file://assertions/review_contract.py:assert_skill_delivery
+      metric: skill_delivery
+    - type: python
+      value: file://assertions/review_contract.py:assert_evidence
+      metric: evidence
+    - type: llm-rubric
+      metric: gold_recall
+      threshold: 0.75
+      value: |
+        Evaluate only whether the candidate review detects the required findings below.
+        Treat semantically equivalent wording as a match; do not require the gold id or
+        exact phrasing. Score equals the fraction of required findings detected with the
+        correct impact. If the required list says NONE, score 1 only when the review does
+        not invent a blocking issue.
+
+        Required findings:
+        {{gold_findings}}
+    - type: llm-rubric
+      metric: supported_precision
+      threshold: 0.75
+      value: |
+        Evaluate the review's actionable findings for precision and evidence. A finding
+        is supported only when it names a concrete location, explains a plausible impact,
+        and supplies a reproduction command or direct local evidence. Penalize findings
+        that merely repeat a limitation the change explicitly documents, and penalize any
+        resolved issue below that is incorrectly reported as still present. Claims about
+        the current existence, release status, or compatibility of an external dependency
+        are unsupported when the review used no current authoritative source; a local diff
+        showing a version string does not prove that version is invalid. Score 1 when every
+        actionable finding is supported and no resolved issue is resurrected.
+
+        Resolved findings that must not be reported as present:
+        {{resolved_findings}}
+
+tests: file://cases/review_cases.yaml
+
+evaluateOptions:
+  maxConcurrency: 2
+
+sharing: false

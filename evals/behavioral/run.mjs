@@ -3,17 +3,30 @@ import { resolve } from "node:path";
 
 const mode = process.argv[2] ?? "smoke";
 const extraArgs = process.argv.slice(3);
-const config = "evals/behavioral/promptfooconfig.yaml";
-const output = "evals/behavioral/results/latest.json";
+const behavioralConfig = "evals/behavioral/promptfooconfig.yaml";
+const behavioralOutput = "evals/behavioral/results/latest.json";
+const crossModelConfig = "evals/behavioral/cross-model-promptfooconfig.yaml";
+const crossModelOutput = "evals/behavioral/results/cross-model-latest.json";
 
 const commands = {
-  validate: ["validate", "config", "-c", config],
-  smoke: ["eval", "-c", config, "--no-cache", "--repeat", "1", "-o", output],
-  baseline: ["eval", "-c", config, "--no-cache", "--repeat", "3", "-o", output],
+  validate: ["validate", "config", "-c", behavioralConfig],
+  smoke: [
+    "eval", "-c", behavioralConfig, "--no-cache", "--repeat", "1", "-o", behavioralOutput,
+  ],
+  baseline: [
+    "eval", "-c", behavioralConfig, "--no-cache", "--repeat", "3", "-o", behavioralOutput,
+  ],
+  "cross-validate": ["validate", "config", "-c", crossModelConfig],
+  "cross-smoke": [
+    "eval", "-c", crossModelConfig, "--no-cache", "--repeat", "1", "-o", crossModelOutput,
+  ],
+  "cross-baseline": [
+    "eval", "-c", crossModelConfig, "--no-cache", "--repeat", "3", "-o", crossModelOutput,
+  ],
 };
 
 if (!(mode in commands)) {
-  console.error(`unknown mode ${mode}; expected validate, smoke, or baseline`);
+  console.error(`unknown mode ${mode}; expected ${Object.keys(commands).join(", ")}`);
   process.exit(2);
 }
 

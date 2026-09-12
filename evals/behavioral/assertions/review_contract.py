@@ -76,6 +76,21 @@ def assert_skill_observation(output: str, context: dict[str, Any]) -> dict[str, 
     return _result(ok, 1.0 if ok else 0.0, f"variant={variant!r}, skillObserved={observed}")
 
 
+def assert_skill_delivery(output: str, context: dict[str, Any]) -> dict[str, Any]:
+    del output
+    metadata = context.get("metadata") or context.get("providerResponse", {}).get("metadata") or {}
+    variant = metadata.get("variant")
+    runtime = metadata.get("runtime")
+    delivery = metadata.get("skillDelivery")
+    expected = "prompt-injected" if variant == "current" else "withheld"
+    ok = runtime == "codex-reference" and delivery == expected
+    return _result(
+        ok,
+        1.0 if ok else 0.0,
+        f"runtime={runtime!r}, variant={variant!r}, skillDelivery={delivery!r}",
+    )
+
+
 def _complete_evidence(item: Any) -> bool:
     if not isinstance(item, dict):
         return False

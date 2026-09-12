@@ -52,3 +52,13 @@ calibration run is excluded from the table above.
 Raw outputs are intentionally ignored because they can be large and may contain
 machine-specific paths. Re-run the suite to inspect them locally at
 `evals/behavioral/results/latest.json`.
+
+## Post-baseline gold correction
+
+The Luna cross-model reference later found, and a human-local reproduction
+confirmed, that `33ebbdd` accepts arbitrary text after the closing `**` of an
+otherwise valid probe header. The existing regression test covered trailing
+text inside the bold span only. The case is therefore no longer labeled as a
+clean control: its expected verdict and human gold now include this separate
+header-parser gap. The table above remains the exact historical score under the
+original label; a future Muse run will grade against the corrected case.

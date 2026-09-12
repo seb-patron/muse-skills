@@ -83,4 +83,6 @@ A passing lint is not evidence that concerns about Muse behavior are resolved.
 Behavioral coverage lives separately under [`evals/behavioral`](behavioral/README.md).
 That Promptfoo suite runs Muse against frozen review heads with and without the
 current skill, then applies deterministic contract checks and an independent
-model grader. It is intentionally not part of this structural lint command.
+model grader. A separate Luna/Sol reference matrix runs the same cases through
+Codex to distinguish a Muse-only failure from a task that is difficult across
+runtimes. It is intentionally not part of this structural lint command.

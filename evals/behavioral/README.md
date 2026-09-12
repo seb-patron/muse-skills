@@ -44,9 +44,10 @@ The first two cases replay PR #1:
 - `e2e3f5e` is the broken Promptfoo implementation. Its gold findings come from
   the later reproduced review: no agent run, shadowable probe rows, deletable
   load-bearing rules, a hard-coded layout count, and no CI enforcement.
-- `33ebbdd` is the repaired structural-lint head. It is a paired control: those
-  findings were fixed, and the lack of model calls is explicitly documented as
-  the boundary of a structural checker rather than misrepresented as an eval.
+- `33ebbdd` fixes those five findings and explicitly scopes itself as a structural
+  checker. Cross-model calibration later exposed and reproduced a separate gap:
+  arbitrary text after a valid bold probe header is ignored, so the case now has
+  that sixth finding as human gold rather than remaining mislabeled as clean.
 
 ## Who grades
 
@@ -90,6 +91,44 @@ update checks are disabled by the launcher. Raw results are written to the ignor
 The smoke run is for wiring and manual inspection. Treat the three-repeat run,
 not a single lucky completion, as the first comparison baseline.
 
+## Cross-model references
+
+The companion `cross-model-promptfooconfig.yaml` runs the same frozen cases and
+grading contract through two Codex reference agents:
+
+- [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna)
+  at medium reasoning is the lower-cost reference.
+- [`gpt-5.6-sol`](https://developers.openai.com/api/docs/models/gpt-5.6-sol)
+  at high reasoning is the quality-ceiling reference.
+
+Each model has a control that explicitly withholds repository skills and a
+treatment that injects the exact current `SKILL.md` into the prompt. The custom
+provider uses an ephemeral Codex run in its own disposable historical clone.
+Workspace writes are enabled there so mutation probes can run, while network
+and web search are disabled; the source checkout is never writable. The run
+also ignores user configuration and repository rules and records model, effort,
+SHA, latency, event count, and token usage. No API key or credential is
+committed; the run uses the operator's existing Codex login.
+
+```sh
+npm run eval:cross-model:validate
+npm run eval:cross-model:smoke   # one pass per case/provider
+npm run eval:cross-model         # three passes per case/provider
+```
+
+Cross-model runs are on demand because agentic repository reviews can be slow
+and token-intensive. Start with the smoke run and inspect its raw output before
+paying for three repeats.
+
+These rows deliberately keep the human gold and Terra grader fixed. Compare
+Luna with and without the skill, and Sol with and without the skill, to look for
+transfer from the instructions. Compare the Codex rows with the Muse baseline
+only as a cross-runtime reference: the agent harness, model family, tool
+behavior, and skill-delivery mechanism all change together. The matrix cannot,
+by itself, prove that a miss is caused only by Muse Spark's weights or only by
+the prompt. See [`CROSS_MODEL_BASELINE.md`](CROSS_MODEL_BASELINE.md) for the
+recorded preliminary run.
+
 ## Add a case
 
 Add a row to `cases/review_cases.yaml` with immutable base/head SHAs, an author
@@ -104,9 +143,11 @@ its PR belongs in the tuning set and must not remain in the held-out test set.
 
 ## Other skills and PR #2
 
-The provider selects the installed project skill from each case's `skill_name`,
-so it can run `review-loop` or `fix-verification` without a provider rewrite.
-The prompt and scoring must still match the behavior under test:
+Both agent providers select the candidate skill from each case's `skill_name`,
+so they can run `review-loop` or `fix-verification` without a provider rewrite.
+Muse installs it in the disposable project; Codex injects the same body into its
+treatment prompt. The prompt and scoring must still match the behavior under
+test:
 
 - `adversarial-review`: defect recall, false approvals, evidence, and unrun probes.
 - `fix-verification`: row custody, final-head repros, carried findings, and counters.

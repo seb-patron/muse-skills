@@ -5,12 +5,13 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from behavioral.assertions import review_contract
-from behavioral.providers import muse_provider
+from behavioral.providers import codex_provider, muse_provider
 
 
-class MuseProviderTests(unittest.TestCase):
+class BehavioralProviderTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -84,6 +85,68 @@ class MuseProviderTests(unittest.TestCase):
         self.assertTrue(parsed["skillObserved"])
         self.assertEqual(parsed["eventCount"], 3)
 
+    def test_codex_prompt_withholds_or_injects_skill(self):
+        control, control_delivery = codex_provider._candidate_prompt(
+            self.repo, "example", "none", "review now"
+        )
+        treatment, treatment_delivery = codex_provider._candidate_prompt(
+            self.repo, "example", "current", "review now"
+        )
+        self.assertEqual(control_delivery, "withheld")
+        self.assertNotIn("example skill", control)
+        self.assertEqual(treatment_delivery, "prompt-injected")
+        self.assertIn("example skill", treatment)
+        self.assertTrue(control.endswith("review now"))
+        self.assertTrue(treatment.endswith("review now"))
+
+    def test_codex_command_is_ephemeral_isolated_and_pinned(self):
+        command = codex_provider._command(
+            "codex", self.repo, "gpt-5.6-luna", "high", "review now"
+        )
+        self.assertIn("--ephemeral", command)
+        self.assertIn("--ignore-user-config", command)
+        self.assertIn("--ignore-rules", command)
+        self.assertIn("--strict-config", command)
+        self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
+        self.assertIn('model_reasoning_effort="high"', command)
+        self.assertIn("sandbox_workspace_write.network_access=false", command)
+        self.assertIn('web_search="disabled"', command)
+        with self.assertRaises(muse_provider.ProviderError):
+            codex_provider._command("codex", self.repo, "unapproved-model", "high", "review")
+
+    def test_parses_codex_output_and_usage(self):
+        lines = [
+            {"type": "thread.started", "thread_id": "fixture"},
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "first"},
+            },
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": "final"},
+            },
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 40,
+                    "output_tokens": 20,
+                },
+            },
+        ]
+        parsed = codex_provider._parse_codex_stream("\n".join(json.dumps(x) for x in lines))
+        self.assertEqual(parsed["output"], "final")
+        self.assertEqual(parsed["usage"]["input_tokens"], 100)
+        self.assertEqual(len(parsed["events"]), 4)
+
+    def test_codex_worker_closes_inherited_stdin(self):
+        completed = subprocess.CompletedProcess(["codex"], 0, "", "")
+        with mock.patch.object(codex_provider.subprocess, "run", return_value=completed) as run:
+            result = codex_provider._run_codex(["codex"], self.repo, 10, {"NO_COLOR": "1"})
+        self.assertIs(result, completed)
+        self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
 
 class ReviewAssertionTests(unittest.TestCase):
     def review(self, verdict="NEEDS_FIXES"):
@@ -115,6 +178,26 @@ class ReviewAssertionTests(unittest.TestCase):
         self.assertTrue(review_contract.assert_expected_verdict(self.review(), context)["pass"])
         self.assertTrue(review_contract.assert_skill_observation(self.review(), context)["pass"])
         self.assertTrue(review_contract.assert_evidence(self.review(), context)["pass"])
+
+    def test_codex_skill_delivery(self):
+        current = {
+            "metadata": {
+                "runtime": "codex-reference",
+                "variant": "current",
+                "skillDelivery": "prompt-injected",
+            }
+        }
+        control = {
+            "metadata": {
+                "runtime": "codex-reference",
+                "variant": "none",
+                "skillDelivery": "withheld",
+            }
+        }
+        self.assertTrue(review_contract.assert_skill_delivery("", current)["pass"])
+        self.assertTrue(review_contract.assert_skill_delivery("", control)["pass"])
+        control["metadata"]["skillDelivery"] = "prompt-injected"
+        self.assertFalse(review_contract.assert_skill_delivery("", control)["pass"])
 
     def test_invalid_json_and_missing_evidence_fail(self):
         context = {"vars": {"head_sha": "abcdef123456", "expected_verdict": "APPROVE"}}

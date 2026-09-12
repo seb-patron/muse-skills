@@ -52,8 +52,9 @@ The Promptfoo harness under [evals/behavioral](evals/behavioral/README.md) runs
 frozen review tasks through Muse twice: an instruction-free placeholder control
 and the current skill. It grades the machine-readable review contract
 deterministically and uses an independent Codex model to compare the review
-against human-verified findings. The first cases replay the broken and repaired
-heads from PR #1.
+against human-verified findings. The first cases replay the broken and later
+structural-lint stages from PR #1, including a subsequently discovered parser
+gap.
 
 ```sh
 npm install
@@ -63,6 +64,19 @@ npm run eval:behavioral:smoke
 
 Use `npm run eval:behavioral` for the three-repeat comparison baseline. These
 runs make model calls and are kept on demand rather than in the per-PR lint job.
+
+For a cross-runtime reference, the same frozen cases can also run through Codex
+Luna and Sol, both without the candidate skill and with its exact current body
+injected into the prompt:
+
+```sh
+npm run eval:cross-model:validate
+npm run eval:cross-model:smoke
+```
+
+See the [cross-model baseline](evals/behavioral/CROSS_MODEL_BASELINE.md) before
+interpreting that comparison. It is a reference for task solvability and skill
+transfer, not a controlled swap of the model running inside Muse.
 
 ## Contributing
 
