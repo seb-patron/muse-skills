@@ -1,0 +1,51 @@
+- description: Historical PR 1 broken Promptfoo head
+  metadata:
+    case_id: pr1-broken-promptfoo
+    source: https://github.com/seb-patron/muse-skills/pull/1
+  vars:
+    base_sha: c18a44d890183b95f4204e3a6805cee7e70d99d5
+    head_sha: e2e3f5e2dc94aa4a84c76ea9f2ddf024b75d77f6
+    skill_name: adversarial-review
+    expected_verdict: NEEDS_FIXES
+    change_summary: >-
+      Adds offline Promptfoo baseline evals for adversarial-review and
+      fix-verification. Custom Python providers read the skill files, six tests
+      assert expected content, and committed results report all six passing.
+    gold_findings: |
+      1. no-behavioral-run (blocking): The providers only read SKILL.md and no model
+         or agent executes either skill, so the claimed baseline does not measure
+         review behavior.
+      2. shadowable-probe-rows (blocking): Five probe-row assertions also match a
+         routing paragraph, so those catalogue rows can be deleted while all tests pass.
+      3. unpinned-load-bearing-rules (blocking): Most required review and closeout
+         instructions can be removed while the suite remains green; headings and length
+         are being tested instead of the behavioral contract.
+      4. hard-coded-layout-count (blocking): The layout assertion expects exactly three
+         walked files, so a third skill, a support file, or an untracked .DS_Store fails
+         even though the documented contract permits future skills and support content.
+      5. no-ci-enforcement (should-fix): No workflow runs the checks on pull requests,
+         so the claimed regression guard depends on a developer remembering to run it.
+    resolved_findings: NONE. This is the defect-bearing historical head.
+
+- description: Historical PR 1 repaired structural-lint head
+  metadata:
+    case_id: pr1-repaired-structural-lint
+    source: https://github.com/seb-patron/muse-skills/pull/1
+  vars:
+    base_sha: c18a44d890183b95f4204e3a6805cee7e70d99d5
+    head_sha: 33ebbdd0a9bc7a6d17ac8fac514784813d567594
+    skill_name: adversarial-review
+    expected_verdict: APPROVE
+    change_summary: >-
+      Adds dependency-light structural validation and executable regression tests.
+      It safely parses YAML, validates tracked skill roots and exact probe identities,
+      pins selected section-scoped clauses, runs mutation-oriented unit tests in CI,
+      and explicitly states that it is not a behavioral Muse evaluation.
+    gold_findings: >-
+      NONE. This is a resolved control for the five findings in the broken head;
+      the final independent re-review found no remaining actionable issue.
+    resolved_findings: |
+      no-behavioral-run is not a defect here because this head explicitly describes the
+      checker as structural validation rather than behavioral evaluation.
+      shadowable-probe-rows, unpinned-load-bearing-rules, hard-coded-layout-count, and
+      no-ci-enforcement were repaired and covered by executable regression tests.

@@ -79,3 +79,8 @@ It also does not test Muse installation, skill discovery/selection, actual
 agent compliance, finding quality, evidence handling, or stopping behavior.
 Evaluating those requires representative Muse runs with known expected outcomes.
 A passing lint is not evidence that concerns about Muse behavior are resolved.
+
+Behavioral coverage lives separately under [`evals/behavioral`](behavioral/README.md).
+That Promptfoo suite runs Muse against frozen review heads with and without the
+current skill, then applies deterministic contract checks and an independent
+model grader. It is intentionally not part of this structural lint command.

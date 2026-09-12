@@ -46,6 +46,24 @@ This checks document structure and text presence; it does not execute Muse or
 establish that Muse loads or follows the skills correctly. See
 [evals/README.md](evals/README.md) for the contract and its limitations.
 
+## Behavioral evaluation
+
+The Promptfoo harness under [evals/behavioral](evals/behavioral/README.md) runs
+frozen review tasks through Muse twice: an instruction-free placeholder control
+and the current skill. It grades the machine-readable review contract
+deterministically and uses an independent Codex model to compare the review
+against human-verified findings. The first cases replay the broken and repaired
+heads from PR #1.
+
+```sh
+npm install
+npm run eval:behavioral:validate
+npm run eval:behavioral:smoke
+```
+
+Use `npm run eval:behavioral` for the three-repeat comparison baseline. These
+runs make model calls and are kept on demand rather than in the per-PR lint job.
+
 ## Contributing
 
 `main` is protected: all changes land via pull request with one approval
