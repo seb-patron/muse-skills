@@ -9,7 +9,10 @@
   "scripts": {
     "eval:behavioral:validate": "node evals/behavioral/run.mjs validate",
     "eval:behavioral:smoke": "node evals/behavioral/run.mjs smoke",
-    "eval:behavioral": "node evals/behavioral/run.mjs baseline"
+    "eval:behavioral": "node evals/behavioral/run.mjs baseline",
+    "eval:cross-model:validate": "node evals/behavioral/run.mjs cross-validate",
+    "eval:cross-model:smoke": "node evals/behavioral/run.mjs cross-smoke",
+    "eval:cross-model": "node evals/behavioral/run.mjs cross-baseline"
   },
   "devDependencies": {
     "@openai/codex-sdk": "0.154.0",

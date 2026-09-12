@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -12,8 +11,23 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from .workspace import (
+        ProviderError,
+        prepare_historical_workspace,
+        repo_root as _repo_root,
+        resolve_commit as _resolve_commit,
+        validate_skill_name,
+    )
+except ImportError:  # Promptfoo loads provider files outside their package.
+    from workspace import (  # type: ignore[no-redef]
+        ProviderError,
+        prepare_historical_workspace,
+        repo_root as _repo_root,
+        resolve_commit as _resolve_commit,
+        validate_skill_name,
+    )
 
-COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 VARIANTS = {"none", "current"}
 CONTROL_SKILL = """---
 name: {skill_name}
@@ -26,36 +40,6 @@ This placeholder intentionally contains no review guidance.
 """
 
 
-class ProviderError(RuntimeError):
-    """A deterministic fixture or Muse execution failure."""
-
-
-def _run(args: list[str], cwd: Path, timeout: int | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        args,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        check=False,
-    )
-
-
-def _git_output(repo: Path, *args: str) -> str:
-    result = _run(["git", *args], repo)
-    if result.returncode != 0:
-        raise ProviderError(result.stderr.strip() or f"git {' '.join(args)} failed")
-    return result.stdout.strip()
-
-
-def _resolve_commit(repo: Path, revision: str) -> str:
-    if not isinstance(revision, str) or not COMMIT_RE.fullmatch(revision):
-        raise ProviderError(f"revision must be a 7-40 character hexadecimal SHA: {revision!r}")
-    return _git_output(repo, "rev-parse", "--verify", f"{revision}^{{commit}}")
-
-
 def _prepare_workspace(
     repo_root: Path,
     destination: Path,
@@ -66,24 +50,13 @@ def _prepare_workspace(
 ) -> tuple[str, str]:
     if variant not in VARIANTS:
         raise ProviderError(f"unknown variant {variant!r}; expected one of {sorted(VARIANTS)}")
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", skill_name):
-        raise ProviderError(f"invalid skill name {skill_name!r}")
-
-    base_sha = _resolve_commit(repo_root, base_revision)
-    head_sha = _resolve_commit(repo_root, head_revision)
-    ancestry = _run(["git", "merge-base", "--is-ancestor", base_sha, head_sha], repo_root)
-    if ancestry.returncode != 0:
-        raise ProviderError(f"base {base_sha} is not an ancestor of head {head_sha}")
-
-    clone = _run(
-        ["git", "clone", "--quiet", "--no-hardlinks", "--no-checkout", str(repo_root), str(destination)],
+    validate_skill_name(skill_name)
+    base_sha, head_sha = prepare_historical_workspace(
         repo_root,
+        destination,
+        base_revision,
+        head_revision,
     )
-    if clone.returncode != 0:
-        raise ProviderError(clone.stderr.strip() or "local fixture clone failed")
-    checkout = _run(["git", "checkout", "--quiet", "--detach", head_sha], destination)
-    if checkout.returncode != 0:
-        raise ProviderError(checkout.stderr.strip() or "fixture checkout failed")
 
     target = destination / ".agents" / "skills" / skill_name / "SKILL.md"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -162,17 +135,6 @@ def _parse_muse_stream(stdout: str, skill_name: str) -> dict[str, Any]:
         "skillObserved": observed,
         "models": sorted(models),
     }
-
-
-def _repo_root(options: dict[str, Any]) -> Path:
-    config = options.get("config") or {}
-    explicit = config.get("repo_root")
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    base_path = config.get("basePath")
-    if not base_path:
-        raise ProviderError("Promptfoo did not supply config.basePath")
-    return Path(base_path).resolve().parents[1]
 
 
 def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -262,6 +224,7 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 "latencyMs": latency_ms,
                 "cached": False,
                 "metadata": {
+                    "runtime": "muse",
                     "variant": variant,
                     "skillName": skill_name if variant == "current" else None,
                     "skillObserved": parsed["skillObserved"],
