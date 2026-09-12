@@ -1,0 +1,18 @@
+{
+  "name": "muse-skills-evals",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Behavioral evaluation harness for Muse review skills",
+  "engines": {
+    "node": ">=22.22.0"
+  },
+  "scripts": {
+    "eval:behavioral:validate": "node evals/behavioral/run.mjs validate",
+    "eval:behavioral:smoke": "node evals/behavioral/run.mjs smoke",
+    "eval:behavioral": "node evals/behavioral/run.mjs baseline"
+  },
+  "devDependencies": {
+    "@openai/codex-sdk": "0.154.0",
+    "promptfoo": "0.123.0"
+  }
+}
