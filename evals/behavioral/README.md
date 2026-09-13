@@ -78,6 +78,9 @@ npm install
 npm run eval:behavioral:validate
 npm run eval:behavioral:smoke   # one pass per case/provider
 npm run eval:behavioral         # three passes per case/provider
+npm run eval:spike:validate
+npm run eval:spike:probe        # one frozen candidate/case plus grading
+npm run eval:spike:train        # four candidates across the three train cases
 ```
 
 The ordinary behavioral provider accepts `MUSE_EVAL_MODEL` for baseline runs. The
@@ -90,6 +93,14 @@ The skill condition explicitly requests that tool call and fails its
 deterministic assertion if activation is not observed. Promptfoo telemetry and
 update checks are disabled by the launcher. Raw results are written to the ignored
 `evals/behavioral/results/` directory.
+
+The spike pins target-provider concurrency to one and sets a 900-second eval-step
+timeout. In Promptfoo 0.123, the presence of that timeout disables provider-grouped
+deferred grading, so each slow Muse result reaches its Terra rubrics before the next
+Muse row starts. The timer is cleared when the Muse output arrives; it guards that
+phase and does not impose a Terra wall-clock limit. Promptfoo may evaluate the three
+rubrics for the row concurrently. `eval:spike:probe` bounds the wiring check to one
+candidate/case row.
 
 The smoke run is for wiring and manual inspection. Treat the three-repeat run,
 not a single lucky completion, as the first comparison baseline.

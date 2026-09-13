@@ -23,12 +23,15 @@ Required evidence before deciding:
 4. Final Luna/Sol references as a milestone, not a wording-tuning loop.
 5. Independent non-author Sol review of the combined spike and proportionate repair.
 
-Current live-evaluation status: the repaired 12-row Muse/Spark train was attempted
-with local execution permission, but its first row did not complete within the
-roughly ten-minute host window and the process was stopped; no quality row completed
-and no model tokens were observed. Earlier sandboxed attempts produced 12 immediate
-session-lease errors before the repair. No validation or held-out model rows have
-been run. The only measured quality evidence remains the committed historical
-baseline: 8 cross-model rows, 21m27s, 2,839,735 candidate-plus-grader tokens,
-1 pass, 5 quality failures, and 2 timeout errors. Those results are preserved and
-not reinterpreted as a finalist decision.
+Current live-evaluation status: a preserved 12-row Muse/Spark train completed four
+candidate calls in 140-203 seconds each, all with exit code 0, the pinned Spark model,
+and observed skill activation. Promptfoo 0.123 deferred Terra grading until after all
+target calls; interruption during target five then aborted the queued graders before
+start. No fully graded quality row completed, and missing candidate usage telemetry
+is not treated as zero. Earlier sandboxed attempts produced 12 immediate session-
+lease errors. The infrastructure repair now requires a fresh one-row probe before
+the train resumes. No validation or held-out model rows have been run. The only
+measured quality evidence remains the committed historical baseline: 8 cross-model
+rows, 21m27s, 2,839,735 candidate-plus-grader tokens, 1 pass, 5 quality failures, and
+2 timeout errors. Those results are preserved and not reinterpreted as a finalist
+decision.

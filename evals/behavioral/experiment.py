@@ -28,6 +28,7 @@ EXPECTED_SPLITS = {
 }
 PROMOTED_SKILL_BLOB = "a92f49327db57accd965ffa9e4586d8732655916"
 SPIKE_MODEL = "muse-spark-1.3-contributor"
+SPIKE_EVAL_TIMEOUT_MS = 900_000
 
 
 def _load(path: Path) -> Any:
@@ -205,7 +206,26 @@ def validate_config() -> list[str]:
         candidate = manifest_by_id.get(item.get("candidate_id"))
         if candidate and item.get("candidate_sha256") != candidate.get("sha256"):
             errors.append(f"{provider.get('label')}: configured hash differs from manifest")
-    default = config.get("defaultTest", {}).get("options", {}).get("provider", {})
+    evaluate_options = config.get("evaluateOptions", {})
+    if evaluate_options.get("maxConcurrency") != 1:
+        errors.append("spike target-provider concurrency must remain 1")
+    timeout_ms = evaluate_options.get("timeoutMs")
+    provider_timeout_ms = max(
+        (
+            item.get("config", {}).get("timeout_seconds", 0) * 1000
+            for item in providers
+            if isinstance(item.get("config", {}).get("timeout_seconds"), int)
+        ),
+        default=0,
+    )
+    if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool) or timeout_ms <= provider_timeout_ms:
+        errors.append("spike eval-step timeout must exceed every Muse provider process timeout")
+    if timeout_ms != SPIKE_EVAL_TIMEOUT_MS:
+        errors.append(
+            f"spike per-row timeout must remain {SPIKE_EVAL_TIMEOUT_MS}ms so Promptfoo grades inline"
+        )
+    default_options = config.get("defaultTest", {}).get("options", {})
+    default = default_options.get("provider", {})
     if default.get("id") != "openai:codex-sdk:gpt-5.6-terra":
         errors.append("independent grader provider/model changed from Terra")
     if default.get("config", {}).get("model_reasoning_effort") != "high":

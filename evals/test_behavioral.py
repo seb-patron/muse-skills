@@ -453,6 +453,23 @@ class SpikeValidationTests(unittest.TestCase):
             errors = experiment.validate_config()
         self.assertTrue(any("provider variant/candidate mapping" in error for error in errors))
 
+    def test_spike_config_requires_timeout_that_disables_deferred_grading(self):
+        config = copy.deepcopy(experiment._load(experiment.CONFIG))
+        manifest = experiment._load(experiment.MANIFEST)
+        config["evaluateOptions"]["timeoutMs"] = 540_000
+        with mock.patch.object(experiment, "_load", side_effect=[config, manifest]):
+            errors = experiment.validate_config()
+        self.assertTrue(any("per-row timeout" in error for error in errors))
+        self.assertTrue(any("exceed every Muse provider" in error for error in errors))
+
+    def test_spike_config_keeps_target_provider_concurrency_at_one(self):
+        config = copy.deepcopy(experiment._load(experiment.CONFIG))
+        manifest = experiment._load(experiment.MANIFEST)
+        config["evaluateOptions"]["maxConcurrency"] = 2
+        with mock.patch.object(experiment, "_load", side_effect=[config, manifest]):
+            errors = experiment.validate_config()
+        self.assertTrue(any("target-provider concurrency" in error for error in errors))
+
     def test_manifest_rejects_duplicate_candidate_entry(self):
         manifest = copy.deepcopy(experiment._load(experiment.MANIFEST))
         manifest["candidates"].append(copy.deepcopy(manifest["candidates"][0]))

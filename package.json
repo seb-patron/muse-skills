@@ -14,6 +14,7 @@
     "eval:cross-model:smoke": "node evals/behavioral/run.mjs cross-smoke",
     "eval:cross-model": "node evals/behavioral/run.mjs cross-baseline",
     "eval:spike:validate": "node evals/behavioral/run.mjs spike-validate",
+    "eval:spike:probe": "node evals/behavioral/run.mjs spike-probe",
     "eval:spike:train": "node evals/behavioral/run.mjs spike-train",
     "eval:spike:validation": "node evals/behavioral/run.mjs spike-validation",
     "eval:spike:heldout": "node evals/behavioral/run.mjs spike-heldout"

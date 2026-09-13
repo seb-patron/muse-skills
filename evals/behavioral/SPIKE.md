@@ -55,16 +55,23 @@ and prior AI reviews are never promoted to human gold.
 
 1. Run `python3 evals/behavioral/experiment.py validate` (or
    `npm run eval:spike:validate`) before any model call.
-2. Run each candidate once on train with `npm run eval:spike:train`.
-3. Eliminate malformed, unsupported, false-approving, non-finalizing, or materially
+2. Run the exact one-row wiring check with `npm run eval:spike:probe`. It runs
+   `spike-current` on `pr1-broken-promptfoo` and must complete both candidate
+   execution and independent grading before the train begins.
+3. Run each candidate once on train with `npm run eval:spike:train`. Target-provider
+   concurrency stays at one. The presence of the 900-second eval-step timeout keeps
+   each Muse result flowing directly into Terra grading instead of deferring every
+   rubric until all Muse calls finish; Promptfoo clears that timer after the Muse
+   output arrives, so it does not bound Terra's wall-clock time.
+4. Eliminate malformed, unsupported, false-approving, non-finalizing, or materially
    over-budget candidates. A timeout is an execution error, not zero recall.
-4. Set `SPIKE_FINALISTS` to exactly two provider labels and run
+5. Set `SPIKE_FINALISTS` to exactly two provider labels and run
    `npm run eval:spike:validation` for three repeats.
-5. Freeze exactly one finalist candidate label and hash in the report. Held-out
+6. Freeze exactly one finalist candidate label and hash in the report. Held-out
    remains locked until the queue is human-adjudicated and replacements are selected
    if disclosure has occurred; the runner verifies both the human-gold sentinels and
    the finalist hash before executing it.
-6. After the prompt comparison is frozen, run Luna/Sol reference rows as a final
+7. After the prompt comparison is frozen, run Luna/Sol reference rows as a final
    milestone only. Never run an unnecessary full cross-model matrix after wording
    changes.
 
@@ -98,8 +105,8 @@ rounds. This branch is currently at round 0/3.
 ## Decision record
 
 No retain/replace/retire decision is made until the train and validation rows are
-actually run and held-out gold is human-adjudicated. The repaired train was attempted
-but did not complete a quality row in this environment; its cost/runtime evidence
-and the earlier session-lease failures are recorded in [`DECISION.md`](DECISION.md).
-The decision record is kept in [`DECISION.md`](DECISION.md); this spike does not
+actually run and held-out gold is human-adjudicated. The preserved interrupted run
+completed four Muse outputs but deferred their grading, so no fully graded quality
+row completed. Its evidence and the earlier session-lease failures are recorded in
+[`DECISION.md`](DECISION.md). The decision record is kept there; this spike does not
 modify the promoted skill.

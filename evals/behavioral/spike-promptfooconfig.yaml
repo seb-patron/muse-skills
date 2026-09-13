@@ -126,5 +126,9 @@ tests: file://cases/spike_cases.yaml
 
 evaluateOptions:
   maxConcurrency: 1
+  # Promptfoo 0.123 groups and defers model-graded assertions when concurrency is
+  # one and no eval-step timeout exists. A positive timeout disables that grouping;
+  # 900s also exceeds the Muse provider's own 540s process timeout.
+  timeoutMs: 900000
 
 sharing: false

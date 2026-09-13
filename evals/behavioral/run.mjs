@@ -18,6 +18,16 @@ const spikeConfig = "evals/behavioral/spike-promptfooconfig.yaml";
 const spikeScoring = "evals/behavioral/scoring.py";
 
 const spikeStages = {
+  "spike-probe": {
+    split: "train",
+    cases: ["pr1-broken-promptfoo"],
+    repeat: 1,
+    providers: ["spike-current"],
+    expectedRows: 1,
+    output: "evals/behavioral/results/spike-probe.json",
+    caseId: "pr1-broken-promptfoo",
+    providerFilter: "^(?:spike-current)$",
+  },
   "spike-train": {
     split: "train",
     cases: ["pr1-broken-promptfoo", "pr1-structural-lint-header-gap", "clean-control-main"],
@@ -65,6 +75,12 @@ for (const [stage, settings] of Object.entries(spikeStages)) {
     "eval", "-c", spikeConfig, "--no-cache", "--repeat", String(settings.repeat),
     "--filter-metadata", `split=${settings.split}`, "-o", settings.output,
   ];
+  if (settings.caseId) {
+    commands[stage].push("--filter-metadata", `case_id=${settings.caseId}`);
+  }
+  if (settings.providerFilter) {
+    commands[stage].push("--filter-providers", settings.providerFilter);
+  }
 }
 
 if (!(mode in commands)) {
