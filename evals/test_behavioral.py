@@ -387,10 +387,17 @@ class SpikeValidationTests(unittest.TestCase):
                         "metadata": {"case_id": "broken", "split": "train"},
                         "vars": {"expected_verdict": "NEEDS_FIXES"},
                         "namedScores": {
+                            "review_contract": 1,
+                            "verdict_accuracy": 1,
+                            "skill_observation": 1,
+                            "candidate_integrity": 1,
+                            "independent_grading": 1,
+                            "evidence": 1,
                             "gold_recall": 0.8,
                             "blocking_recall": 0.5,
                             "supported_precision": 0.75,
                         },
+                        "error": "quality assertion failed",
                         "response": {
                             "output": 'Review result:\n```json\n{"verdict":"NEEDS_FIXES"}\n```',
                             "tokenUsage": {"total": 123},
@@ -413,6 +420,9 @@ class SpikeValidationTests(unittest.TestCase):
         self.assertEqual(rows[0]["all_gold_recall"], 0.8)
         self.assertEqual(rows[0]["actual_verdict"], "NEEDS_FIXES")
         self.assertEqual(rows[0]["candidate_tokens"], 123)
+        self.assertTrue(rows[0]["completion"])
+        self.assertIsNone(rows[0]["error"])
+        self.assertEqual(rows[0]["assertion_error"], "quality assertion failed")
         self.assertIsNone(rows[1]["all_gold_recall"])
         summary = scoring.aggregate(rows)
         self.assertEqual(summary["candidate_token_rows"], 1)
@@ -424,6 +434,11 @@ class SpikeValidationTests(unittest.TestCase):
           const parsed = parseFinalists('spike-current, spike-minimal');
           if (parsed.filter !== '^(?:spike-current|spike-minimal)$') process.exit(1);
           if (selectProviderLabels(['spike-current','spike-minimal','spike-risk-first'], parsed.filter).length !== 2) process.exit(2);
+          const module = await import('./evals/behavioral/selection.mjs');
+          if (!module.isCompletedPromptfooExit(0) || !module.isCompletedPromptfooExit(100)) process.exit(4);
+          if (module.isCompletedPromptfooExit(1) || module.isCompletedPromptfooExit(130)) process.exit(5);
+          if (!module.hasCompleteNormalizedRows({aggregate:{rows:1,completed:1,errors:0}}, 1)) process.exit(6);
+          if (module.hasCompleteNormalizedRows({aggregate:{rows:1,completed:0,errors:1}}, 1)) process.exit(7);
           let rejected = false;
           try { parseFinalists('spike-current,spike-current'); } catch { rejected = true; }
           if (!rejected) process.exit(3);

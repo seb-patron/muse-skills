@@ -2,7 +2,9 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  hasCompleteNormalizedRows,
   hasExactRowCardinality,
+  isCompletedPromptfooExit,
   parseFinalists,
   selectProviderLabels,
   SPIKE_PROVIDER_LABELS,
@@ -148,6 +150,21 @@ function verifySpikeOutput(stageName, finalistLabels) {
     if (summary.error) console.error(summary.error.message);
     return false;
   }
+  let metrics;
+  try {
+    metrics = JSON.parse(readFileSync(metricsOutput, "utf8"));
+  } catch (error) {
+    console.error(`unable to read normalized metrics: ${error.message}`);
+    return false;
+  }
+  if (!hasCompleteNormalizedRows(metrics, settings.expectedRows)) {
+    console.error(
+      `${stageName} completion contract failed: expected ${settings.expectedRows} ` +
+      `fully graded rows, got ${metrics.aggregate?.completed ?? "unknown"} complete and ` +
+      `${metrics.aggregate?.errors ?? "unknown"} errors`,
+    );
+    return false;
+  }
   console.log(`${stageName}: verified ${rows.length} rows; normalized metrics at ${metricsOutput}`);
   return true;
 }
@@ -199,6 +216,7 @@ const result = spawnSync(executable, [...commands[mode], ...extraArgs], {
     PROMPTFOO_DISABLE_UPDATE: "1",
     PROMPTFOO_DISABLE_SHARING: "1",
     PROMPTFOO_CONFIG_DIR: resolve(".promptfoo"),
+    ...(isSpike ? { PROMPTFOO_FAILED_TEST_EXIT_CODE: "100" } : {}),
   },
 });
 
@@ -206,6 +224,9 @@ if (result.error) {
   console.error(result.error.message);
   process.exit(1);
 }
-if ((result.status ?? 1) !== 0) process.exit(result.status ?? 1);
+const promptfooStatus = result.status ?? 1;
+if (mode in spikeStages ? !isCompletedPromptfooExit(promptfooStatus) : promptfooStatus !== 0) {
+  process.exit(promptfooStatus);
+}
 if (mode in spikeStages && !verifySpikeOutput(mode, finalistLabels)) process.exit(1);
 process.exit(0);

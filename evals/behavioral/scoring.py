@@ -19,6 +19,19 @@ except ImportError:  # CLI execution from evals/behavioral.
     from assertions.review_contract import parse_review  # type: ignore[no-redef]
 
 
+REQUIRED_NAMED_SCORES = {
+    "review_contract",
+    "verdict_accuracy",
+    "skill_observation",
+    "candidate_integrity",
+    "independent_grading",
+    "evidence",
+    "gold_recall",
+    "blocking_recall",
+    "supported_precision",
+}
+
+
 def _set(value: Any) -> set[str]:
     if not isinstance(value, Iterable) or isinstance(value, (str, bytes, Mapping)):
         return set()
@@ -67,6 +80,23 @@ def _candidate_tokens(raw: Mapping[str, Any]) -> int | None:
     return int(value) if isinstance(value, int) and value >= 0 else None
 
 
+def _execution_error(
+    raw: Mapping[str, Any], response: Mapping[str, Any], output: str
+) -> str | None:
+    provider_error = response.get("error")
+    if provider_error:
+        return str(provider_error)
+    row_error = str(raw.get("error") or "")
+    if not output.strip():
+        return row_error or "candidate returned no final output"
+    if _named_score(raw, "review_contract") != 1:
+        return row_error or "candidate output failed the review contract"
+    missing = sorted(name for name in REQUIRED_NAMED_SCORES if _named_score(raw, name) is None)
+    if missing:
+        return row_error or f"row is missing required scores: {', '.join(missing)}"
+    return None
+
+
 def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Convert raw Promptfoo rows into the facts consumed by ``score_row``.
 
@@ -91,7 +121,8 @@ def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         facts = provider_metadata.get("evaluationFacts")
         facts = facts if isinstance(facts, Mapping) else {}
         output = _response_output(raw)
-        completed = bool(output.strip()) and not bool(raw.get("error"))
+        execution_error = _execution_error(raw, response, output)
+        completed = execution_error is None
         converted.append(
             {
                 "case_id": case_metadata.get("case_id"),
@@ -109,7 +140,8 @@ def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "actionable_findings": facts.get("actionable_findings"),
                 "supported_findings": facts.get("supported_findings"),
                 "completion": completed,
-                "error": raw.get("error"),
+                "error": execution_error,
+                "assertion_error": raw.get("error"),
                 "latency_ms": raw.get("latencyMs"),
                 "candidate_tokens": _candidate_tokens(raw),
                 "candidate_cost": response.get("cost") if isinstance(response.get("cost"), (int, float)) else None,

@@ -47,4 +47,16 @@ export function hasExactRowCardinality(rows, providerLabels, caseIds, repeat) {
   );
 }
 
+export function isCompletedPromptfooExit(status) {
+  // Promptfoo 0.123 returns 100 when evaluation rows complete but one or more
+  // assertions fail. That is quality evidence, not an infrastructure failure.
+  return status === 0 || status === 100;
+}
+
+export function hasCompleteNormalizedRows(payload, expectedRows) {
+  const aggregate = payload?.aggregate;
+  return aggregate?.rows === expectedRows &&
+    aggregate?.completed === expectedRows && aggregate?.errors === 0;
+}
+
 export { SPIKE_PROVIDER_LABELS };

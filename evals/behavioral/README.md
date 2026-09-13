@@ -97,10 +97,16 @@ update checks are disabled by the launcher. Raw results are written to the ignor
 The spike pins target-provider concurrency to one and sets a 900-second eval-step
 timeout. In Promptfoo 0.123, the presence of that timeout disables provider-grouped
 deferred grading, so each slow Muse result reaches its Terra rubrics before the next
-Muse row starts. The timer is cleared when the Muse output arrives; it guards that
-phase and does not impose a Terra wall-clock limit. Promptfoo may evaluate the three
-rubrics for the row concurrently. `eval:spike:probe` bounds the wiring check to one
-candidate/case row.
+Muse row starts. The timer bounds the complete Muse-plus-Terra row; its 900-second
+budget exceeds the Muse provider's 540-second process limit. Promptfoo may evaluate
+the three rubrics for the row concurrently. `eval:spike:probe` bounds the wiring
+check to one candidate/case row.
+
+Promptfoo exits with status 100 when a completed row fails a quality assertion. The
+spike runner accepts that one status long enough to verify exact row cardinality and
+write normalized metrics; other nonzero statuses remain infrastructure failures.
+The converter distinguishes a fully graded quality failure from a provider error,
+timeout, missing rubric, or malformed review contract.
 
 The smoke run is for wiring and manual inspection. Treat the three-repeat run,
 not a single lucky completion, as the first comparison baseline.

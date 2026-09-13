@@ -1,16 +1,21 @@
 # Train evaluation report
 
-Revision rounds: 0/3
+Revision rounds: 2/3
 
-Status: infrastructure repair awaiting a fresh one-row probe. In the preserved
-interrupted train, the first four Muse/Spark candidate calls completed in 140-203
-seconds with exit code 0, the pinned model, and observed skill activation. Promptfoo
-0.123 deferred their Terra rubrics until all 12 candidate calls, and the host process
-was interrupted during candidate call five. The queued graders were then aborted
-before start, so no fully graded quality row completed. Candidate usage telemetry was
-absent rather than measured as zero. The repaired command still enforces 12 rows, one
-pass for each of the four hashed candidates, with the existing 24-step / 540-second
-Muse limits and independent Terra-high grading.
+Status: exact infrastructure probe passed; frozen 12-row train pending. Probe
+`eval-T5V-2026-09-13T01:27:21` completed `spike-current` on
+`pr1-broken-promptfoo` in 4m09s. Muse exited 0 after 216,041ms with the pinned Spark
+model and observed skill activation, then all three Terra rubrics completed (61,980
+grading tokens). The normalized row has completion 1, errors 0, blocking/all-gold
+recall 0, supported precision 1, and correct `NEEDS_FIXES` verdict. Candidate token
+telemetry was absent rather than measured as zero. This wiring probe is not included
+in the comparative train table below.
+
+The repaired train command enforces 12 rows, one pass for each of the four hashed
+candidates, with the existing 24-step / 540-second Muse limits and independent
+Terra-high grading. The earlier interrupted run remains diagnostic only: four Muse
+calls completed before Promptfoo's deferred grader queue was interrupted during call
+five.
 
 | Candidate | Train rows | Fully graded | Blocking recall | All-gold recall | Supported precision | False approvals | Verdict accuracy | Latency | Candidate tokens/cost | Novel human-verified |
 | --- | ---: | ---: | --- | --- | --- | ---: | --- | --- | --- | ---: |

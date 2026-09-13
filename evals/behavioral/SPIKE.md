@@ -1,6 +1,6 @@
 # Evidence-backed review-skill spike
 
-Revision rounds: 0/3
+Revision rounds: 2/3
 
 Branch: `codex/evidence-backed-review-skill-spike`
 
@@ -61,8 +61,7 @@ and prior AI reviews are never promoted to human gold.
 3. Run each candidate once on train with `npm run eval:spike:train`. Target-provider
    concurrency stays at one. The presence of the 900-second eval-step timeout keeps
    each Muse result flowing directly into Terra grading instead of deferring every
-   rubric until all Muse calls finish; Promptfoo clears that timer after the Muse
-   output arrives, so it does not bound Terra's wall-clock time.
+   rubric until all Muse calls finish and bounds the complete Muse-plus-Terra row.
 4. Eliminate malformed, unsupported, false-approving, non-finalizing, or materially
    over-budget candidates. A timeout is an execution error, not zero recall.
 5. Set `SPIKE_FINALISTS` to exactly two provider labels and run
@@ -100,13 +99,14 @@ response is claimed.
 The combined spike must receive substantive review from a non-author Sol agent.
 Mechanical fixtures or documentation may receive Luna review. The author addresses
 supported findings and reruns proportionate checks, with a maximum of three repair
-rounds. This branch is currently at round 0/3.
+rounds. This branch is currently at round 2/3.
 
 ## Decision record
 
 No retain/replace/retire decision is made until the train and validation rows are
-actually run and held-out gold is human-adjudicated. The preserved interrupted run
-completed four Muse outputs but deferred their grading, so no fully graded quality
-row completed. Its evidence and the earlier session-lease failures are recorded in
-[`DECISION.md`](DECISION.md). The decision record is kept there; this spike does not
-modify the promoted skill.
+actually run and held-out gold is human-adjudicated. After the deferred-grading
+repair, exact probe `eval-T5V-2026-09-13T01:27:21` completed one Muse/Spark row and
+all three Terra rubrics in 4m09s with zero execution errors. The current candidate
+missed the probe case's required findings, which is quality evidence rather than a
+hang. The decision record is kept in [`DECISION.md`](DECISION.md); this spike does
+not modify the promoted skill.
