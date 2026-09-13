@@ -493,10 +493,20 @@ class SpikeValidationTests(unittest.TestCase):
         self.assertTrue(any("exactly the four immutable candidates" in error for error in errors))
 
     def test_heldout_selection_requires_frozen_validation_record(self):
-        errors = experiment.validate_heldout(
-            "spike-risk-first",
-            "bad857e4298bf73efa4bcbfac114e67dfa03a9ff19545c5a2594d9de1016d51f",
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            record_path = Path(temp_dir) / "FINALIST.yaml"
+            record_path.write_text(
+                "status: pending-validation\n"
+                "validation_finalists: [spike-current, spike-minimal]\n"
+                "selected_label: null\n"
+                "selected_sha256: null\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(experiment, "FINALIST_RECORD", record_path):
+                errors = experiment.validate_heldout(
+                    "spike-risk-first",
+                    "bad857e4298bf73efa4bcbfac114e67dfa03a9ff19545c5a2594d9de1016d51f",
+                )
         self.assertTrue(any("not a frozen validation selection" in error for error in errors))
 
     def test_frozen_finalist_record_rejects_duplicate_validation_finalists(self):

@@ -103,12 +103,20 @@ rounds. This branch is currently at round 2/3.
 
 ## Decision record
 
-No retain/replace/retire decision is made until the train and validation rows are
-run and held-out gold is human-adjudicated. Frozen train
+No retain/replace/retire decision is made until held-out gold is human-adjudicated
+and the final reference milestone exists. Frozen train
 `eval-pL4-2026-09-13T01:43:26` completed all 12 rows with zero execution errors and
-selected `spike-current` plus `spike-minimal` for validation. After the deferred-grading
-repair, exact probe `eval-T5V-2026-09-13T01:27:21` completed one Muse/Spark row and
-all three Terra rubrics in 4m09s with zero execution errors. The current candidate
-missed the probe case's required findings, which is quality evidence rather than a
-hang. The decision record is kept in [`DECISION.md`](DECISION.md); this spike does
-not modify the promoted skill.
+selected `spike-current` plus `spike-minimal` for validation. Frozen validation
+`eval-pNM-2026-09-13T02:31:20` then completed 12/12 clean-control rows with zero
+assertion failures or execution errors; both candidates were perfect on clean
+behavior, and minimal was 2.9s faster per row. Because validation cannot measure
+defect recall, current's stronger train safety result controls the provisional
+selection. `spike-current` is frozen as the sole held-out finalist at SHA-256
+`dd4f217a140beb155f209f9215932fa44e84936096796ade725f49199c239380`.
+
+After the deferred-grading repair, exact probe
+`eval-T5V-2026-09-13T01:27:21` completed one Muse/Spark row and all three Terra
+rubrics in 4m09s with zero execution errors. The current candidate missed the probe
+case's required findings, which is quality evidence rather than a hang. Held-out
+remains locked pending human gold, and this spike does not modify the promoted
+skill. The full decision record is kept in [`DECISION.md`](DECISION.md).

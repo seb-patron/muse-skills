@@ -1,5 +1,5 @@
-status: pending-validation
+status: frozen
 validation_finalists: [spike-current, spike-minimal]
-selected_label: null
-selected_sha256: null
-source: train eval-pL4-2026-09-13T01:43:26 selected current on quality and minimal as the equal-quality challenger latency tie-breaker; freeze one only after validation
+selected_label: spike-current
+selected_sha256: dd4f217a140beb155f209f9215932fa44e84936096796ade725f49199c239380
+source: validation eval-pNM-2026-09-13T02:31:20 tied both finalists on clean-control quality; train eval-pL4-2026-09-13T01:43:26 favored current on blocking recall, false approvals, and verdict accuracy
