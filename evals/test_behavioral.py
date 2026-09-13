@@ -155,17 +155,18 @@ class BehavioralProviderTests(unittest.TestCase):
             "payload": {"text": "{}"},
         })
         with mock.patch.object(muse_provider, "_prepare_workspace", return_value=(self.base, self.head)):
-            with mock.patch.object(
-                muse_provider,
-                "_run_muse",
-                return_value=subprocess.CompletedProcess(["muse"], 0, output, ""),
-            ) as run:
-                with mock.patch.dict(muse_provider.os.environ, {"MUSE_EVAL_MODEL": "baseline-model"}):
-                    response = muse_provider.call_api(
-                        "review now",
-                        {"config": {"variant": "current", "timeout_seconds": 1, "repo_root": str(self.repo)}},
-                        {"vars": {"base_sha": self.base, "head_sha": self.head, "skill_name": "example"}},
-                    )
+            with mock.patch.object(muse_provider.shutil, "which", return_value="/usr/bin/muse"):
+                with mock.patch.object(
+                    muse_provider,
+                    "_run_muse",
+                    return_value=subprocess.CompletedProcess(["muse"], 0, output, ""),
+                ) as run:
+                    with mock.patch.dict(muse_provider.os.environ, {"MUSE_EVAL_MODEL": "baseline-model"}):
+                        response = muse_provider.call_api(
+                            "review now",
+                            {"config": {"variant": "current", "timeout_seconds": 1, "repo_root": str(self.repo)}},
+                            {"vars": {"base_sha": self.base, "head_sha": self.head, "skill_name": "example"}},
+                        )
         self.assertNotIn("error", response)
         self.assertEqual(run.call_args.args[0][run.call_args.args[0].index("--model") + 1], "baseline-model")
 
@@ -179,25 +180,26 @@ class BehavioralProviderTests(unittest.TestCase):
         })
         digest = hashlib.sha256((self.repo / "skills/example/SKILL.md").read_bytes()).hexdigest()
         with mock.patch.object(muse_provider, "_prepare_workspace", return_value=(self.base, self.head)):
-            with mock.patch.object(
-                muse_provider,
-                "_run_muse",
-                return_value=subprocess.CompletedProcess(["muse"], 0, output, ""),
-            ):
-                response = muse_provider.call_api(
-                    "review now",
-                    {
-                        "config": {
-                            "variant": "current",
-                            "candidate_id": "current",
-                            "candidate_sha256": digest,
-                            "model": "muse-spark-1.3-contributor",
-                            "timeout_seconds": 1,
-                            "repo_root": str(self.repo),
-                        }
-                    },
-                    {"vars": {"base_sha": self.base, "head_sha": self.head, "skill_name": "example"}},
-                )
+            with mock.patch.object(muse_provider.shutil, "which", return_value="/usr/bin/muse"):
+                with mock.patch.object(
+                    muse_provider,
+                    "_run_muse",
+                    return_value=subprocess.CompletedProcess(["muse"], 0, output, ""),
+                ):
+                    response = muse_provider.call_api(
+                        "review now",
+                        {
+                            "config": {
+                                "variant": "current",
+                                "candidate_id": "current",
+                                "candidate_sha256": digest,
+                                "model": "muse-spark-1.3-contributor",
+                                "timeout_seconds": 1,
+                                "repo_root": str(self.repo),
+                            }
+                        },
+                        {"vars": {"base_sha": self.base, "head_sha": self.head, "skill_name": "example"}},
+                    )
         self.assertIn("observing the delivered project skill", response["error"])
 
     def test_codex_prompt_withholds_or_injects_skill(self):
