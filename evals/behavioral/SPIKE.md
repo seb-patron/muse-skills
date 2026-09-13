@@ -104,7 +104,9 @@ rounds. This branch is currently at round 2/3.
 ## Decision record
 
 No retain/replace/retire decision is made until the train and validation rows are
-actually run and held-out gold is human-adjudicated. After the deferred-grading
+run and held-out gold is human-adjudicated. Frozen train
+`eval-pL4-2026-09-13T01:43:26` completed all 12 rows with zero execution errors and
+selected `spike-current` plus `spike-minimal` for validation. After the deferred-grading
 repair, exact probe `eval-T5V-2026-09-13T01:27:21` completed one Muse/Spark row and
 all three Terra rubrics in 4m09s with zero execution errors. The current candidate
 missed the probe case's required findings, which is quality evidence rather than a

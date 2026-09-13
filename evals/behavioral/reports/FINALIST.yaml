@@ -1,5 +1,5 @@
 status: pending-validation
-validation_finalists: []
+validation_finalists: [spike-current, spike-minimal]
 selected_label: null
 selected_sha256: null
-source: freeze this record from the completed three-repeat validation report before held-out execution
+source: train eval-pL4-2026-09-13T01:43:26 selected current on quality and minimal as the equal-quality challenger latency tie-breaker; freeze one only after validation
