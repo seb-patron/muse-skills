@@ -1,0 +1,32 @@
+protocol: muse-adversarial-review-spike-v1
+immutable: true
+hash_algorithm: sha256
+candidate_models:
+  - gpt-5.6-sol
+  - gpt-5.6-luna
+grader:
+  provider: openai:codex-sdk
+  model: gpt-5.6-terra
+  reasoning_effort: high
+  role: independent scorer; never the tested candidate
+candidates:
+  - id: current
+    label: Current skill (control treatment)
+    path: skills/adversarial-review/SKILL.md
+    sha256: dd4f217a140beb155f209f9215932fa44e84936096796ade725f49199c239380
+    source: promoted production skill, unchanged for this spike
+  - id: minimal
+    label: Minimal reviewer
+    path: evals/behavioral/candidates/minimal.md
+    sha256: 3302f27cfa8341775be7e44a74fdc71cd62c06588c549e59e0ec6064aba8766d
+    source: spike-authored candidate
+  - id: risk-first
+    label: Risk-first reviewer
+    path: evals/behavioral/candidates/risk-first.md
+    sha256: bad857e4298bf73efa4bcbfac114e67dfa03a9ff19545c5a2594d9de1016d51f
+    source: spike-authored candidate
+  - id: upstream-adapted
+    label: AI Diff Reviewer mechanism adaptation
+    path: evals/behavioral/candidates/upstream-adapted.md
+    sha256: e280c85c5d3fa196fdef15c8f71eea9e6e24a5ec4c95194f2e3ba9959b9c264f
+    source: MIT-compatible mechanisms from DailybotHQ/ai-diff-reviewer v2.0.1, commit 87109d628ccaee7cd62cdac851afdaecc87bba7a

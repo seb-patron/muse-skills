@@ -1,0 +1,130 @@
+description: Evidence-backed four-candidate Muse/Spark adversarial-review spike
+
+prompts:
+  - file://prompts/review.txt
+
+providers:
+  - id: file://providers/muse_provider.py
+    label: spike-current
+    config:
+      variant: current
+      candidate_id: current
+      candidate_sha256: dd4f217a140beb155f209f9215932fa44e84936096796ade725f49199c239380
+      model: muse-spark-1.3-contributor
+      reasoning_effort: high
+      timeout: 600000
+      max_model_steps: 24
+      max_tool_output_bytes: 200000
+      timeout_seconds: 540
+  - id: file://providers/muse_provider.py
+    label: spike-minimal
+    config:
+      variant: candidate
+      candidate_id: minimal
+      candidate_sha256: 3302f27cfa8341775be7e44a74fdc71cd62c06588c549e59e0ec6064aba8766d
+      model: muse-spark-1.3-contributor
+      reasoning_effort: high
+      timeout: 600000
+      max_model_steps: 24
+      max_tool_output_bytes: 200000
+      timeout_seconds: 540
+  - id: file://providers/muse_provider.py
+    label: spike-risk-first
+    config:
+      variant: candidate
+      candidate_id: risk-first
+      candidate_sha256: bad857e4298bf73efa4bcbfac114e67dfa03a9ff19545c5a2594d9de1016d51f
+      model: muse-spark-1.3-contributor
+      reasoning_effort: high
+      timeout: 600000
+      max_model_steps: 24
+      max_tool_output_bytes: 200000
+      timeout_seconds: 540
+  - id: file://providers/muse_provider.py
+    label: spike-upstream-adapted
+    config:
+      variant: candidate
+      candidate_id: upstream-adapted
+      candidate_sha256: e280c85c5d3fa196fdef15c8f71eea9e6e24a5ec4c95194f2e3ba9959b9c264f
+      model: muse-spark-1.3-contributor
+      reasoning_effort: high
+      timeout: 600000
+      max_model_steps: 24
+      max_tool_output_bytes: 200000
+      timeout_seconds: 540
+
+defaultTest:
+  options:
+    disableVarExpansion: true
+    provider:
+      id: openai:codex-sdk:gpt-5.6-terra
+      config:
+        model_reasoning_effort: high
+        sandbox_mode: read-only
+        working_dir: ../..
+  assert:
+    - type: python
+      value: file://assertions/review_contract.py:assert_review_contract
+      metric: review_contract
+    - type: python
+      value: file://assertions/review_contract.py:assert_expected_verdict
+      metric: verdict_accuracy
+    - type: python
+      value: file://assertions/review_contract.py:assert_skill_observation
+      metric: skill_observation
+    - type: python
+      value: file://assertions/review_contract.py:assert_candidate_identity
+      metric: candidate_integrity
+    - type: python
+      value: file://assertions/review_contract.py:assert_no_self_grading
+      metric: independent_grading
+    - type: python
+      value: file://assertions/review_contract.py:assert_evidence
+      metric: evidence
+    - type: llm-rubric
+      metric: gold_recall
+      threshold: 0.75
+      value: |
+        Evaluate only whether the candidate review detects the required findings below.
+        Treat semantically equivalent wording as a match; do not require the gold id or
+        exact phrasing. Score equals the fraction of required findings detected with the
+        correct impact. If the required list says NONE, score 1 only when the review does
+        not invent a blocking issue.
+
+        Required findings:
+        {{gold_findings}}
+    - type: llm-rubric
+      metric: blocking_recall
+      threshold: 0.75
+      value: |
+        Evaluate only the required findings marked blocking below. Score equals the
+        fraction of blocking findings detected with the correct impact. If there are
+        no blocking findings, score 1 unless the review invents a blocking issue.
+        Do not treat a timeout or missing final review as zero recall; that is an
+        execution error handled by the deterministic completion metric.
+
+        Required findings:
+        {{gold_findings}}
+    - type: llm-rubric
+      metric: supported_precision
+      threshold: 0.75
+      value: |
+        Evaluate the review's actionable findings for precision and evidence. A finding
+        is supported only when it names a concrete location, explains a plausible impact,
+        and supplies a reproduction command or direct local evidence. Penalize findings
+        that merely repeat a limitation the change explicitly documents, and penalize any
+        resolved issue below that is incorrectly reported as still present. Claims about
+        the current existence, release status, or compatibility of an external dependency
+        are unsupported when the reviewer used no current authoritative source; a local
+        diff showing a version string does not prove that version is invalid. Score 1 when
+        every actionable finding is supported and no resolved issue is resurrected.
+
+        Resolved findings that must not be reported as present:
+        {{resolved_findings}}
+
+tests: file://cases/spike_cases.yaml
+
+evaluateOptions:
+  maxConcurrency: 1
+
+sharing: false

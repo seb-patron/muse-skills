@@ -80,9 +80,12 @@ npm run eval:behavioral:smoke   # one pass per case/provider
 npm run eval:behavioral         # three passes per case/provider
 ```
 
-Set `MUSE_EVAL_MODEL` to pin the tested Muse model. The provider records model
-ids surfaced by Muse, exact base/head SHAs, duration, event count, and whether
-Muse emitted a successful `read_skill` result for the requested project skill.
+The ordinary behavioral provider accepts `MUSE_EVAL_MODEL` for baseline runs. The
+evidence-backed spike ignores divergent overrides and requires its configured
+`muse-spark-1.3-contributor` model to appear in runtime telemetry. The provider
+records model ids surfaced by Muse, exact base/head SHAs, duration, event count,
+and whether Muse emitted a successful `read_skill` result for the requested project
+skill.
 The skill condition explicitly requests that tool call and fails its
 deterministic assertion if activation is not observed. Promptfoo telemetry and
 update checks are disabled by the launcher. Raw results are written to the ignored
@@ -128,6 +131,29 @@ behavior, and skill-delivery mechanism all change together. The matrix cannot,
 by itself, prove that a miss is caused only by Muse Spark's weights or only by
 the prompt. See [`CROSS_MODEL_BASELINE.md`](CROSS_MODEL_BASELINE.md) for the
 recorded preliminary run.
+
+## Evidence-backed spike
+
+The separate four-candidate experiment is documented in [`SPIKE.md`](SPIKE.md).
+It preserves the current skill, adds minimal/risk-first/upstream-adapted prompt
+candidates under `candidates/`, verifies their SHA-256 identities before delivery,
+and keeps the eight-case corpus and frozen train/validation/held-out assignments in
+`cases/spike_cases.yaml`. Validate its configuration without model calls:
+
+```sh
+uv run --with PyYAML==6.0.3 python evals/behavioral/experiment.py validate
+npm run eval:spike:validate
+```
+
+The live sequence is bounded: one train run per candidate, three validation repeats
+for exactly two finalists, then one held-out run only after human gold is
+adjudicated and one finalist ID/hash is frozen. Every spike stage runs the structural
+preflight, filters by `metadata.split`, checks its exact row/provider count, and
+writes a deterministic `.metrics.json` normalization beside the raw Promptfoo
+output. `spike-heldout` is locked by default. The independent grader remains
+`openai:codex-sdk:gpt-5.6-terra` at high reasoning; the tested Muse model is
+`muse-spark-1.3-contributor`. The spike does not change the promoted skill or the
+historical baseline configs.
 
 ## Add a case
 

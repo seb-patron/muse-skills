@@ -78,6 +78,10 @@ See the [cross-model baseline](evals/behavioral/CROSS_MODEL_BASELINE.md) before
 interpreting that comparison. It is a reference for task solvability and skill
 transfer, not a controlled swap of the model running inside Muse.
 
+The evidence-backed retain/replace/retire spike is documented in
+[evals/behavioral/SPIKE.md](evals/behavioral/SPIKE.md). It is experimental and
+does not alter the promoted `adversarial-review` skill.
+
 ## Contributing
 
 `main` is protected: all changes land via pull request with one approval

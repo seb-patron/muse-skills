@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 
-def _review(output: str) -> dict[str, Any]:
+def parse_review(output: str) -> dict[str, Any]:
     text = output.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -25,6 +25,9 @@ def _review(output: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("output JSON must be an object")
     return value
+
+
+_review = parse_review
 
 
 def _result(pass_: bool, score: float, reason: str) -> dict[str, Any]:
@@ -71,7 +74,7 @@ def assert_skill_observation(output: str, context: dict[str, Any]) -> dict[str, 
     metadata = context.get("metadata") or context.get("providerResponse", {}).get("metadata") or {}
     variant = metadata.get("variant")
     observed = bool(metadata.get("skillObserved"))
-    expected = variant == "current"
+    expected = variant in {"current", "candidate"}
     ok = observed == expected
     return _result(ok, 1.0 if ok else 0.0, f"variant={variant!r}, skillObserved={observed}")
 
@@ -88,6 +91,44 @@ def assert_skill_delivery(output: str, context: dict[str, Any]) -> dict[str, Any
         ok,
         1.0 if ok else 0.0,
         f"runtime={runtime!r}, variant={variant!r}, skillDelivery={delivery!r}",
+    )
+
+
+def assert_candidate_identity(output: str, context: dict[str, Any]) -> dict[str, Any]:
+    del output
+    metadata = context.get("metadata") or context.get("providerResponse", {}).get("metadata") or {}
+    variant = metadata.get("variant")
+    if variant == "none":
+        return _result(True, 1.0, "control has no candidate identity")
+    candidate_id = metadata.get("candidateId")
+    digest = metadata.get("candidateSha256")
+    ok = (
+        isinstance(candidate_id, str)
+        and bool(candidate_id)
+        and isinstance(digest, str)
+        and bool(re.fullmatch(r"[0-9a-f]{64}", digest))
+        and metadata.get("candidateDelivery") == "project-skill"
+    )
+    return _result(ok, 1.0 if ok else 0.0, f"candidateId={candidate_id!r}, hash={digest!r}")
+
+
+def assert_no_self_grading(output: str, context: dict[str, Any]) -> dict[str, Any]:
+    del output
+    metadata = context.get("metadata") or context.get("providerResponse", {}).get("metadata") or {}
+    observed = metadata.get("museModels")
+    candidate_models = set(observed) if isinstance(observed, list) and all(isinstance(item, str) for item in observed) else set()
+    grader_model = str(context.get("config", {}).get("grader_model", "gpt-5.6-terra"))
+    expected = metadata.get("museExpectedModel")
+    ok = (
+        bool(candidate_models)
+        and isinstance(expected, str)
+        and candidate_models == {expected}
+        and grader_model not in candidate_models
+    )
+    return _result(
+        ok,
+        1.0 if ok else 0.0,
+        f"grader={grader_model}, expected={expected!r}, candidateModels={sorted(candidate_models)}",
     )
 
 
