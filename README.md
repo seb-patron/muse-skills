@@ -82,6 +82,18 @@ The evidence-backed retain/replace/retire spike is documented in
 [evals/behavioral/SPIKE.md](evals/behavioral/SPIKE.md). It is experimental and
 does not alter the promoted `adversarial-review` skill.
 
+## Operator notes
+
+Day-to-day lore for running review loops in Muse sessions on this machine —
+not skills, not project policy:
+
+- [docs/review-spawn-checklist.md](docs/review-spawn-checklist.md) — spawn
+  contract so reviewer verdicts survive child-result transport (interim
+  until the `review-verdict-delivery` skill lands; see issue #10).
+- [docs/machine-lore.md](docs/machine-lore.md) — machine-specific
+  workarounds with delete-when conditions (broken `python3.13` shim,
+  child-result archaeology fallback).
+
 ## Contributing
 
 `main` is protected: all changes land via pull request with one approval
