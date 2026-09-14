@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ try:
     from .workspace import (
         ProviderError,
         prepare_historical_workspace,
+        prepare_remote_historical_workspace,
         repo_root as _repo_root,
         resolve_commit as _resolve_commit,
         validate_skill_name,
@@ -25,6 +27,7 @@ except ImportError:  # Promptfoo loads provider files outside their package.
     from workspace import (  # type: ignore[no-redef]
         ProviderError,
         prepare_historical_workspace,
+        prepare_remote_historical_workspace,
         repo_root as _repo_root,
         resolve_commit as _resolve_commit,
         validate_skill_name,
@@ -32,9 +35,13 @@ except ImportError:  # Promptfoo loads provider files outside their package.
 
 VARIANTS = {"none", "current", "candidate"}
 CANDIDATE_PATHS = {
+    "evidence-claims-v2": Path("evals/behavioral/candidates/evidence-claims-v2.md"),
     "minimal": Path("evals/behavioral/candidates/minimal.md"),
     "risk-first": Path("evals/behavioral/candidates/risk-first.md"),
     "upstream-adapted": Path("evals/behavioral/candidates/upstream-adapted.md"),
+}
+REMOTE_CASE_SOURCES = {
+    "gen-v-research-tools": "https://github.com/seb-patron/gen-v-research-tools.git",
 }
 CONTROL_SKILL = """---
 name: {skill_name}
@@ -55,16 +62,30 @@ def _prepare_workspace(
     variant: str,
     skill_name: str,
     candidate_id: str | None = None,
+    source_repository: str | None = None,
 ) -> tuple[str, str]:
     if variant not in VARIANTS:
         raise ProviderError(f"unknown variant {variant!r}; expected one of {sorted(VARIANTS)}")
     validate_skill_name(skill_name)
-    base_sha, head_sha = prepare_historical_workspace(
-        repo_root,
-        destination,
-        base_revision,
-        head_revision,
-    )
+    if source_repository is None or source_repository == "muse-skills":
+        base_sha, head_sha = prepare_historical_workspace(
+            repo_root,
+            destination,
+            base_revision,
+            head_revision,
+        )
+    elif source_repository in REMOTE_CASE_SOURCES:
+        base_sha, head_sha = prepare_remote_historical_workspace(
+            REMOTE_CASE_SOURCES[source_repository],
+            destination,
+            base_revision,
+            head_revision,
+        )
+    else:
+        raise ProviderError(
+            f"unknown case source {source_repository!r}; expected one of "
+            f"{sorted([*REMOTE_CASE_SOURCES, 'muse-skills'])}"
+        )
 
     target = destination / ".agents" / "skills" / skill_name / "SKILL.md"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -126,6 +147,35 @@ def _candidate_identity(
         "candidateSha256": digest,
         "candidateDelivery": "project-skill",
     }
+
+
+def _verify_source_trees(
+    workspace: Path,
+    base_sha: str,
+    head_sha: str,
+    expected_base_tree: str | None,
+    expected_head_tree: str | None,
+) -> None:
+    for label, commit, expected in (
+        ("base", base_sha, expected_base_tree),
+        ("head", head_sha, expected_head_tree),
+    ):
+        if expected is None:
+            continue
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{40}", expected):
+            raise ProviderError(f"expected {label} tree must be a full lowercase SHA")
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{commit}^{{tree}}"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        actual = result.stdout.strip()
+        if result.returncode != 0 or actual != expected:
+            raise ProviderError(
+                f"{label} tree mismatch: expected {expected}, got {actual or 'unavailable'}"
+            )
 
 
 def _activate_skill_prompt(prompt: str, skill_name: str) -> str:
@@ -298,6 +348,20 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 variant,
                 skill_name,
                 candidate_id,
+                str(variables.get("source_repository"))
+                if variables.get("source_repository")
+                else None,
+            )
+            _verify_source_trees(
+                workspace,
+                base_sha,
+                head_sha,
+                str(variables.get("base_tree_sha"))
+                if variables.get("base_tree_sha")
+                else None,
+                str(variables.get("head_tree_sha"))
+                if variables.get("head_tree_sha")
+                else None,
             )
 
             spike_run = "candidate_id" in config
@@ -384,6 +448,7 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                     "skillObserved": parsed["skillObserved"],
                     "baseSha": base_sha,
                     "headSha": head_sha,
+                    "sourceRepository": variables.get("source_repository", "muse-skills"),
                     "museModels": parsed["models"],
                     "museExpectedModel": configured_model or None,
                     "museTokenUsage": parsed["usage"] or None,

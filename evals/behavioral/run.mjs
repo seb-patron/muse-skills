@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import {
   hasCompleteNormalizedRows,
   hasExactRowCardinality,
@@ -18,6 +18,7 @@ const crossModelConfig = "evals/behavioral/cross-model-promptfooconfig.yaml";
 const crossModelOutput = "evals/behavioral/results/cross-model-latest.json";
 const spikeConfig = "evals/behavioral/spike-promptfooconfig.yaml";
 const spikeScoring = "evals/behavioral/scoring.py";
+const developmentConfig = "evals/behavioral/development-v2-promptfooconfig.yaml";
 
 const spikeStages = {
   "spike-probe": {
@@ -54,6 +55,59 @@ const spikeStages = {
   },
 };
 
+const developmentStages = {
+  "development-v2": {
+    split: "development",
+    cases: [
+      "genv-pr87-first-repair-type-boundary",
+      "genv-pr90-evidence-claim",
+      "genv-pr90-synchronized-clean",
+    ],
+    repeat: 1,
+    providers: ["development-v2-current", "development-v2-evidence-claims"],
+    expectedRows: 6,
+    output: "evals/behavioral/results/development-v2.json",
+  },
+};
+
+function developmentOutputPaths(settings) {
+  const output = resolve(settings.output);
+  return [
+    output,
+    `${output}.metrics-v2.json`,
+    `${output}.reservation.json`,
+    `${output}.promptfoo`,
+  ];
+}
+
+function existingDevelopmentArtifacts(settings) {
+  return developmentOutputPaths(settings).filter((path) => existsSync(path));
+}
+
+function reserveDevelopmentOutput(stageName, settings) {
+  const [output, metrics, reservation, cache] = developmentOutputPaths(settings);
+  const existing = [output, metrics, reservation, cache].filter((path) => existsSync(path));
+  if (existing.length > 0) {
+    return { ok: false, reason: `existing development result artifacts: ${existing.join(", ")}` };
+  }
+  mkdirSync(dirname(output), { recursive: true });
+  try {
+    writeFileSync(
+      reservation,
+      `${JSON.stringify({ stage: stageName, output, metrics, cache })}\n`,
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
+    );
+  } catch (error) {
+    return { ok: false, reason: `unable to reserve development result identity: ${error.message}` };
+  }
+  try {
+    mkdirSync(cache, { mode: 0o700 });
+  } catch (error) {
+    return { ok: false, reason: `unable to create private development cache: ${error.message}` };
+  }
+  return { ok: true, reservation, cache };
+}
+
 const commands = {
   validate: ["validate", "config", "-c", behavioralConfig],
   smoke: [
@@ -70,6 +124,7 @@ const commands = {
     "eval", "-c", crossModelConfig, "--no-cache", "--repeat", "3", "-o", crossModelOutput,
   ],
   "spike-validate": ["validate", "config", "-c", spikeConfig],
+  "development-v2-validate": ["validate", "config", "-c", developmentConfig],
 };
 
 for (const [stage, settings] of Object.entries(spikeStages)) {
@@ -85,12 +140,19 @@ for (const [stage, settings] of Object.entries(spikeStages)) {
   }
 }
 
+for (const [stage, settings] of Object.entries(developmentStages)) {
+  commands[stage] = [
+    "eval", "-c", developmentConfig, "--no-cache", "--repeat", String(settings.repeat),
+    "--filter-metadata", `split=${settings.split}`, "-o", settings.output,
+  ];
+}
+
 if (!(mode in commands)) {
   console.error(`unknown mode ${mode}; expected ${Object.keys(commands).join(", ")}`);
   process.exit(2);
 }
 
-function runSpikePreflight(args) {
+function runExperimentPreflight(args) {
   const result = spawnSync(
     process.env.SPIKE_PYTHON ?? "uv",
     process.env.SPIKE_PYTHON
@@ -110,8 +172,7 @@ function resultRows(output) {
   return rows;
 }
 
-function verifySpikeOutput(stageName, finalistLabels) {
-  const settings = spikeStages[stageName];
+function verifyExperimentOutput(stageName, settings, finalistLabels) {
   const output = resolve(settings.output);
   let rows;
   try {
@@ -170,7 +231,19 @@ function verifySpikeOutput(stageName, finalistLabels) {
 }
 
 const isSpike = mode === "spike-validate" || mode in spikeStages;
+const isDevelopment = mode === "development-v2-validate" || mode in developmentStages;
+const isManagedExperiment = isSpike || isDevelopment;
 let finalistLabels;
+if (mode in developmentStages) {
+  process.umask(0o077);
+  const existing = existingDevelopmentArtifacts(developmentStages[mode]);
+  if (existing.length > 0) {
+    console.error(
+      `development-v2 refuses to overwrite prior or partial attempt artifacts: ${existing.join(", ")}`,
+    );
+    process.exit(2);
+  }
+}
 if (isSpike) {
   if (extraArgs.length > 0) {
     console.error("spike modes reject extra Promptfoo arguments so the pinned grader and row contract cannot be overridden");
@@ -204,7 +277,22 @@ if (isSpike) {
       process.exit(2);
     }
   }
-  if (!runSpikePreflight(preflightArgs)) process.exit(1);
+  if (!runExperimentPreflight(preflightArgs)) process.exit(1);
+}
+if (isDevelopment) {
+  if (extraArgs.length > 0) {
+    console.error("development-v2 modes reject extra Promptfoo arguments so the pinned profile and row contract cannot be overridden");
+    process.exit(2);
+  }
+  if (!runExperimentPreflight(["validate-development"])) process.exit(1);
+  if (mode in developmentStages) {
+    const reservation = reserveDevelopmentOutput(mode, developmentStages[mode]);
+    if (!reservation.ok) {
+      console.error(`development-v2 did not start: ${reservation.reason}`);
+      process.exit(2);
+    }
+    console.log(`development-v2 reserved result custody at ${reservation.reservation}`);
+  }
 }
 
 const executable = process.platform === "win32" ? "promptfoo.cmd" : "promptfoo";
@@ -215,8 +303,10 @@ const result = spawnSync(executable, [...commands[mode], ...extraArgs], {
     PROMPTFOO_DISABLE_TELEMETRY: "1",
     PROMPTFOO_DISABLE_UPDATE: "1",
     PROMPTFOO_DISABLE_SHARING: "1",
-    PROMPTFOO_CONFIG_DIR: resolve(".promptfoo"),
-    ...(isSpike ? { PROMPTFOO_FAILED_TEST_EXIT_CODE: "100" } : {}),
+    PROMPTFOO_CONFIG_DIR: mode in developmentStages
+      ? developmentOutputPaths(developmentStages[mode])[3]
+      : resolve(".promptfoo"),
+    ...(isManagedExperiment ? { PROMPTFOO_FAILED_TEST_EXIT_CODE: "100" } : {}),
   },
 });
 
@@ -225,8 +315,15 @@ if (result.error) {
   process.exit(1);
 }
 const promptfooStatus = result.status ?? 1;
-if (mode in spikeStages ? !isCompletedPromptfooExit(promptfooStatus) : promptfooStatus !== 0) {
+if (mode in spikeStages || mode in developmentStages
+  ? !isCompletedPromptfooExit(promptfooStatus)
+  : promptfooStatus !== 0) {
   process.exit(promptfooStatus);
 }
-if (mode in spikeStages && !verifySpikeOutput(mode, finalistLabels)) process.exit(1);
+if (mode in spikeStages && !verifyExperimentOutput(mode, spikeStages[mode], finalistLabels)) {
+  process.exit(1);
+}
+if (mode in developmentStages && !verifyExperimentOutput(mode, developmentStages[mode])) {
+  process.exit(1);
+}
 process.exit(0);
