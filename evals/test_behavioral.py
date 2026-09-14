@@ -456,6 +456,46 @@ class SpikeValidationTests(unittest.TestCase):
             sum(case["vars"]["gold_findings"] == "NONE" for case in cases), 1
         )
 
+    def test_versioned_development_v3_calibration(self):
+        self.assertEqual(experiment.validate_development_v3_manifest(), [])
+        self.assertEqual(experiment.validate_development_v3_cases(), [])
+        self.assertEqual(experiment.validate_development_v3_config(), [])
+        cases = experiment._load(experiment.DEVELOPMENT_V3_CASES)
+        control = next(
+            case for case in cases
+            if case["metadata"]["case_id"] == "genv-pr90-synchronized-clean"
+        )
+        self.assertEqual(control["vars"]["expected_verdict"], "APPROVE")
+        self.assertIn("(low)", control["vars"]["gold_findings"])
+        self.assertNotIn(
+            "tracked finalization metadata are synchronized",
+            control["vars"]["resolved_findings"],
+        )
+
+    def test_development_v3_rejects_truth_and_rubric_regressions(self):
+        cases = experiment._load(experiment.DEVELOPMENT_V3_CASES)
+        bad_cases = copy.deepcopy(cases)
+        control = next(
+            case for case in bad_cases
+            if case["metadata"]["case_id"] == "genv-pr90-synchronized-clean"
+        )
+        control["vars"]["gold_findings"] = "NONE"
+        with mock.patch.object(experiment, "_load", side_effect=[bad_cases, experiment._load(experiment.DEVELOPMENT_CASES)]):
+            self.assertNotEqual(experiment.validate_development_v3_cases(), [])
+
+        config = experiment._load(experiment.DEVELOPMENT_V3_CONFIG)
+        manifest = experiment._load(experiment.DEVELOPMENT_V3_MANIFEST)
+        for label, metric, replacement in (
+            ("gold recall follows candidate severity", "gold_recall", "Score only matching severities. {{gold_findings}}"),
+            ("blocking recall follows candidate severity", "blocking_recall", "No blocking label means no recall. {{gold_findings}}"),
+        ):
+            with self.subTest(label=label):
+                changed = copy.deepcopy(config)
+                item = next(value for value in changed["defaultTest"]["assert"] if value["metric"] == metric)
+                item["value"] = replacement
+                with mock.patch.object(experiment, "_load", side_effect=[changed, manifest]):
+                    self.assertNotEqual(experiment.validate_development_v3_config(), [])
+
     def test_development_config_rejects_gold_prompt_and_profile_weakening(self):
         canonical = experiment._load(experiment.DEVELOPMENT_CONFIG)
         manifest = experiment._load(experiment.DEVELOPMENT_MANIFEST)
@@ -674,6 +714,37 @@ class SpikeValidationTests(unittest.TestCase):
         self.assertEqual(normalized["normalization"]["id"], "muse-review-metrics-v2")
         self.assertEqual(normalized["aggregate"]["all_gold_recall_scored_rows"], 1)
 
+    def test_calibrated_recall_is_separate_from_candidate_severity_label(self):
+        common = {
+            "provider": {"label": "development-v3-evidence-claims"},
+            "metadata": {"case_id": "calibration", "split": "development"},
+            "vars": {
+                "expected_verdict": "NEEDS_FIXES",
+                "gold_findings": "1. exact-boundary (blocking): accepts a type alias",
+            },
+            "response": {"metadata": {"candidateId": "evidence-claims-v2"}},
+        }
+        detected = copy.deepcopy(common)
+        detected["namedScores"] = {
+            metric: 1 for metric in scoring.REQUIRED_NAMED_SCORES
+        }
+        detected["response"]["output"] = (
+            '{"verdict":"NEEDS_FIXES","findings":'
+            '[{"severity":"should-fix","title":"exact boundary accepts a type alias"}]}'
+        )
+        missed = copy.deepcopy(common)
+        missed["namedScores"] = {
+            metric: 1 for metric in scoring.REQUIRED_NAMED_SCORES
+        }
+        missed["namedScores"].update({"gold_recall": 0, "blocking_recall": 0})
+        missed["response"]["output"] = '{"verdict":"APPROVE","findings":[]}'
+
+        rows = scoring.normalize({"results": {"results": [detected, missed]}})["rows"]
+        self.assertEqual(rows[0]["all_gold_recall"], 1)
+        self.assertEqual(rows[0]["blocking_finding_recall"], 1)
+        self.assertEqual(rows[1]["all_gold_recall"], 0)
+        self.assertEqual(rows[1]["blocking_finding_recall"], 0)
+
     def test_explicit_unknown_gold_cannot_fall_back_to_provider_facts(self):
         common = {
             "provider": {"label": "spike-current"},
@@ -863,40 +934,55 @@ class SpikeValidationTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(development.returncode, 2)
+        development_v3 = subprocess.run(
+            [
+                "node",
+                "evals/behavioral/run.mjs",
+                "development-v3-validate",
+                "--grader",
+                "override",
+            ],
+            cwd=experiment.ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(development_v3.returncode, 2)
 
     def test_development_runner_refuses_to_overwrite_raw_metrics_or_reservation(self):
-        output = experiment.ROOT / "evals/behavioral/results/development-v2.json"
-        artifacts = [
-            output,
-            Path(f"{output}.metrics-v2.json"),
-            Path(f"{output}.reservation.json"),
-            Path(f"{output}.promptfoo"),
-        ]
-        output.parent.mkdir(parents=True, exist_ok=True)
-        for artifact in artifacts:
-            with self.subTest(artifact=artifact.name):
-                self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
-                if artifact.suffix == ".promptfoo":
-                    artifact.mkdir()
-                else:
-                    artifact.write_text("preserve me\n", encoding="utf-8")
-                try:
-                    result = subprocess.run(
-                        ["node", "evals/behavioral/run.mjs", "development-v2"],
-                        cwd=experiment.ROOT,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    self.assertEqual(result.returncode, 2)
-                    self.assertIn("refuses to overwrite", result.stderr)
-                    if artifact.is_file():
-                        self.assertEqual(artifact.read_text(encoding="utf-8"), "preserve me\n")
-                finally:
-                    if artifact.is_dir():
-                        artifact.rmdir()
+        for mode in ("development-v2", "development-v3"):
+            output = experiment.ROOT / f"evals/behavioral/results/{mode}.json"
+            artifacts = [
+                output,
+                Path(f"{output}.metrics-v2.json"),
+                Path(f"{output}.reservation.json"),
+                Path(f"{output}.promptfoo"),
+            ]
+            output.parent.mkdir(parents=True, exist_ok=True)
+            for artifact in artifacts:
+                with self.subTest(mode=mode, artifact=artifact.name):
+                    self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
+                    if artifact.suffix == ".promptfoo":
+                        artifact.mkdir()
                     else:
-                        artifact.unlink(missing_ok=True)
+                        artifact.write_text("preserve me\n", encoding="utf-8")
+                    try:
+                        result = subprocess.run(
+                            ["node", "evals/behavioral/run.mjs", mode],
+                            cwd=experiment.ROOT,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        self.assertEqual(result.returncode, 2)
+                        self.assertIn("refuses to overwrite", result.stderr)
+                        if artifact.is_file():
+                            self.assertEqual(artifact.read_text(encoding="utf-8"), "preserve me\n")
+                    finally:
+                        if artifact.is_dir():
+                            artifact.rmdir()
+                        else:
+                            artifact.unlink(missing_ok=True)
 
     def test_development_runner_applies_private_creation_policy(self):
         output = experiment.ROOT / "evals/behavioral/results/development-v2.json"

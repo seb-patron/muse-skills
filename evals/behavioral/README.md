@@ -187,8 +187,17 @@ outputs are unavailable for an evidence-preserving recomputation.
 candidate experiment over two independently reproduced Gen V review defects and a
 nonempty repaired control. It preserves every frozen v1 artifact and uses the same
 native Muse provider and `muse-review-metrics-v2` normalizer. Validate it without
-inference using `npm run eval:development-v2:validate`. The six-row
-`npm run eval:development-v2` screen is a future, separately authorized live run.
+inference using `npm run eval:development-v2:validate`. Its six-row command was
+later executed under separate authorization; the raw results and scores remain
+private, immutable v2 evidence.
+
+The executed v2 calibration later exposed an incorrect approval-control annotation
+and an ambiguous blocking-recall instruction. [`DEVELOPMENT_V3.md`](DEVELOPMENT_V3.md)
+defines the additive corrected profile while preserving v2 as historical evidence.
+Validate v3 offline with `npm run eval:development-v3:validate`; running
+`npm run eval:development-v3` requires separate live and private-source authorization.
+Do not mix v2 and v3 aggregate recall directly because the corrected low finding
+changes the approval-control recall denominator.
 
 ## Add a case
 

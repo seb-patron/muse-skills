@@ -19,7 +19,9 @@
     "eval:spike:validation": "node evals/behavioral/run.mjs spike-validation",
     "eval:spike:heldout": "node evals/behavioral/run.mjs spike-heldout",
     "eval:development-v2:validate": "node evals/behavioral/run.mjs development-v2-validate",
-    "eval:development-v2": "node evals/behavioral/run.mjs development-v2"
+    "eval:development-v2": "node evals/behavioral/run.mjs development-v2",
+    "eval:development-v3:validate": "node evals/behavioral/run.mjs development-v3-validate",
+    "eval:development-v3": "node evals/behavioral/run.mjs development-v3"
   },
   "devDependencies": {
     "@openai/codex-sdk": "0.154.0",

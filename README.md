@@ -82,6 +82,10 @@ The evidence-backed retain/replace/retire spike is documented in
 [evals/behavioral/SPIKE.md](evals/behavioral/SPIKE.md). It is experimental and
 does not alter the promoted `adversarial-review` skill.
 
+The disclosed development calibration has immutable v2 evidence and an additive
+[corrected v3 profile](evals/behavioral/DEVELOPMENT_V3.md). Offline validation is
+available as `npm run eval:development-v3:validate`; no v3 live run is implied.
+
 ## Contributing
 
 `main` is protected: all changes land via pull request with one approval

@@ -1,0 +1,109 @@
+- description: "[development] Gen V PR #87 first repair exact-boundary case"
+  metadata:
+    case_id: genv-pr87-first-repair-type-boundary
+    family: genv-pr87
+    split: development
+    data_role: development
+    gold_status: independently-reproduced-development
+    human_adjudication: false
+    exposure: disclosed-before-candidate-freeze
+    source: https://github.com/seb-patron/gen-v-research-tools/pull/87
+    review_provenance: https://github.com/seb-patron/gen-v-research-tools/pull/87#issuecomment-5658445369
+    reproduction: >-
+      At the frozen head, an independently constructed synthetic summary changed
+      execution.frames from integer 3600 to float 3600.0; assemble() accepted it
+      and emitted `float 3600.0`. No commercial input or emulator run was used.
+  vars:
+    source_repository: gen-v-research-tools
+    base_sha: b5eb2e15da936b33f9d6703b2a347777affe1c05
+    base_tree_sha: f09830fc326462a0916142c84671094be4c0cfa9
+    head_sha: 8850ee389109d22bd2ce7b4d3a23ae50ff3c1ddc
+    head_tree_sha: 0550846f60851b5033a4d48ad109fc6bb19b2c35
+    skill_name: adversarial-review
+    expected_verdict: NEEDS_FIXES
+    change_summary: >-
+      Adds a bounded shifted-press research probe, runner, fixture assembler,
+      hash-only durable fixture, research note, and synthetic validation. The
+      assembler validates a nested runner summary before publishing a fixture.
+    gold_findings: |
+      1. nested-numeric-type-alias (blocking): The assembler compares trusted
+         nested structures with ordinary Python equality and then emits caller-shaped
+         values. Equal-valued numeric aliases such as execution.frames=3600.0 in
+         place of integer 3600 are accepted, so the claimed exact structured boundary
+         is false and untrusted scalar types can enter the durable fixture.
+    resolved_findings: |
+      Earlier path-loader/privacy, framebuffer-precondition, and unmatched-contrast
+      findings are repaired at this head and must not be reported as still present.
+
+- description: "[development] Gen V PR #90 published evidence-claim case"
+  metadata:
+    case_id: genv-pr90-evidence-claim
+    family: genv-pr90
+    split: development
+    data_role: development
+    gold_status: independently-reproduced-development
+    human_adjudication: false
+    exposure: disclosed-before-candidate-freeze
+    source: https://github.com/seb-patron/gen-v-research-tools/pull/90
+    review_provenance: https://github.com/seb-patron/gen-v-research-tools/pull/90#issuecomment-5666657534
+    reproduction: >-
+      Independent arithmetic over the committed hash-only fixture found 11 changes
+      among 13 adjacent intervals for both repetitions of every control arm, with
+      [2299,2300] and [2303,2304] stable, contradicting the tracked note's `every`
+      claim. No commercial input or emulator run was used.
+  vars:
+    source_repository: gen-v-research-tools
+    base_sha: c90e9aa89e483e44574335646d0ffa49ac92423e
+    base_tree_sha: 82d4e13d101e7474af6eb2344baf9f00d029f5db
+    head_sha: 3ecd94150e5030b88b1111d17706d6f4c0063ed4
+    head_tree_sha: 3114db9214dc16ca46037ddbaa0d60b292b9e994
+    skill_name: adversarial-review
+    expected_verdict: NEEDS_FIXES
+    change_summary: >-
+      Adds a bounded facing-response sweep, runner, fixture assembler, hash-only
+      durable fixture, required research note, reading-trail entry, and synthetic
+      validation after an authorized sixteen-invocation evidence run.
+    gold_findings: |
+      1. overstated-control-animation (should-fix): The research note says all four
+         controls differ at every adjacent checkpoint pair, but direct recomputation
+         from the committed fixture yields 11 of 13 changing intervals for every
+         retained control attempt. [2299,2300] and [2303,2304] are stable, so the
+         merge-critical negative-control claim exceeds its durable evidence.
+    resolved_findings: NONE. This is the defect-bearing evidence head.
+
+- description: "[development] Gen V PR #90 synchronized nonempty approval control"
+  metadata:
+    case_id: genv-pr90-synchronized-clean
+    family: genv-pr90
+    split: development
+    data_role: development
+    gold_status: independently-reproduced-development
+    human_adjudication: false
+    exposure: disclosed-before-candidate-freeze
+    source: https://github.com/seb-patron/gen-v-research-tools/pull/90
+    review_provenance: bounded independent exact-head recheck; no claim of human adjudication
+    reproduction: >-
+      The nonempty base-to-head change passed 74 focused tests, the privacy gate,
+      tracked-input integrity, and diff whitespace checks. Independent source review
+      confirmed the evidence correction and one remaining low review-history metadata
+      mismatch with no behavioral or evidence impact. The full suite and hosted checks
+      were not rerun, so this oracle remains limited to the changed artifacts and gates.
+  vars:
+    source_repository: gen-v-research-tools
+    base_sha: c90e9aa89e483e44574335646d0ffa49ac92423e
+    base_tree_sha: 82d4e13d101e7474af6eb2344baf9f00d029f5db
+    head_sha: e45d8eb3be5edfd2315f021119063401d5beb794
+    head_tree_sha: f9e8b6282ed3e84f3cce84d2b6b475952e11d381
+    skill_name: adversarial-review
+    expected_verdict: APPROVE
+    change_summary: >-
+      Adds the complete bounded facing-response sweep and its finalized evidence,
+      documentation, assembler, runner, and focused synthetic validation.
+    gold_findings: |
+      1. review-history-metadata-mismatch (low): A remaining review-round count in
+         tracked history disagrees with the finalized research note. The mismatch
+         does not invalidate the fixture, evidence claim, or focused gates, so the
+         expected terminal verdict remains APPROVE.
+    resolved_findings: |
+      overstated-control-animation is repaired: every retained control attempt is
+      described as 11 of 13 changing intervals and both stable pairs are named.
