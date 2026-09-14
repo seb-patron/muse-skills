@@ -27,6 +27,12 @@ outputs needed to recompute the committed train and validation reports are not p
 of this branch, so those reports remain historical v1 records. Their recall values
 must not be compared with v2 output or used as corrected evidence.
 
+Normalized rows also retain the native case role/family, source repository,
+base/head identities, candidate content hash, and candidate-usage coverage supplied
+by the provider. Missing candidate telemetry remains `unavailable` with a null token
+value; it is never converted to zero. These additive receipt fields do not rewrite
+the frozen v1 reports.
+
 ## Historical Git visibility
 
 Historical review workspaces are initialized as new repositories and fetch only the

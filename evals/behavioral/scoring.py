@@ -150,7 +150,13 @@ def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             {
                 "case_id": case_metadata.get("case_id"),
                 "split": case_metadata.get("split"),
+                "family": case_metadata.get("family"),
+                "data_role": case_metadata.get("data_role") or case_metadata.get("split"),
                 "candidate_id": provider_metadata.get("candidateId") or provider.get("label"),
+                "candidate_sha256": provider_metadata.get("candidateSha256"),
+                "source_repository": provider_metadata.get("sourceRepository"),
+                "base_sha": provider_metadata.get("baseSha"),
+                "head_sha": provider_metadata.get("headSha"),
                 "expected_verdict": (raw.get("vars") or {}).get("expected_verdict"),
                 "actual_verdict": _actual_verdict(output),
                 "gold_ids": facts.get("gold_ids"),
@@ -169,6 +175,8 @@ def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "assertion_error": raw.get("error"),
                 "latency_ms": raw.get("latencyMs"),
                 "candidate_tokens": _candidate_tokens(raw),
+                "candidate_token_status": provider_metadata.get("candidateTokenStatus")
+                or "unavailable",
                 "candidate_cost": response.get("cost") if isinstance(response.get("cost"), (int, float)) else None,
                 "novel_human_verified": facts.get("novel_human_verified", 0),
             }
@@ -208,7 +216,14 @@ def score_row(row: Mapping[str, Any]) -> dict[str, Any]:
         blocking_applicable = None
     return {
         "case_id": row.get("case_id"),
+        "split": row.get("split"),
+        "family": row.get("family"),
+        "data_role": row.get("data_role"),
         "candidate_id": row.get("candidate_id"),
+        "candidate_sha256": row.get("candidate_sha256"),
+        "source_repository": row.get("source_repository"),
+        "base_sha": row.get("base_sha"),
+        "head_sha": row.get("head_sha"),
         "completion": completed,
         "blocking_finding_recall": (
             direct_blocking if completed and blocking_applicable is True and direct_blocking is not None
@@ -227,6 +242,7 @@ def score_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "verdict_accuracy": (actual == expected) if completed and expected in {"APPROVE", "NEEDS_FIXES"} else None,
         "latency_ms": row.get("latency_ms"),
         "candidate_tokens": row.get("candidate_tokens"),
+        "candidate_token_status": row.get("candidate_token_status", "unavailable"),
         "candidate_cost": row.get("candidate_cost"),
         "novel_human_verified": row.get("novel_human_verified", 0),
     }

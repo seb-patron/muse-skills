@@ -91,6 +91,48 @@ def prepare_historical_workspace(
     return local_base, local_head
 
 
+def prepare_remote_historical_workspace(
+    source_url: str,
+    destination: Path,
+    base_revision: str,
+    head_revision: str,
+) -> tuple[str, str]:
+    """Fetch one authenticated exact-head history without retaining its remote identity."""
+
+    for label, revision in (("base", base_revision), ("head", head_revision)):
+        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ProviderError(f"remote {label} revision must be a full lowercase SHA")
+
+    initialized = run(["git", "init", "--quiet", str(destination)], destination.parent)
+    if initialized.returncode != 0:
+        raise ProviderError(initialized.stderr.strip() or "fixture repository initialization failed")
+    fetched = run(
+        [
+            "git",
+            "-c",
+            "fetch.writeCommitGraph=false",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            source_url,
+            head_revision,
+        ],
+        destination,
+    )
+    if fetched.returncode != 0:
+        raise ProviderError(fetched.stderr.strip() or "allowed remote fixture history fetch failed")
+    checkout = run(["git", "checkout", "--quiet", "--detach", head_revision], destination)
+    if checkout.returncode != 0:
+        raise ProviderError(checkout.stderr.strip() or "fixture checkout failed")
+    local_base = resolve_commit(destination, base_revision)
+    local_head = resolve_commit(destination, head_revision)
+    ancestry = run(["git", "merge-base", "--is-ancestor", local_base, local_head], destination)
+    if ancestry.returncode != 0:
+        raise ProviderError(f"base {local_base} is not an ancestor of head {local_head}")
+    return local_base, local_head
+
+
 def repo_root(options: dict[str, Any]) -> Path:
     config = options.get("config") or {}
     explicit = config.get("repo_root")

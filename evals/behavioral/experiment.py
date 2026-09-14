@@ -18,6 +18,10 @@ MANIFEST = ROOT / "evals/behavioral/candidates/manifest.yaml"
 CASES = ROOT / "evals/behavioral/cases/spike_cases.yaml"
 CONFIG = ROOT / "evals/behavioral/spike-promptfooconfig.yaml"
 FINALIST_RECORD = ROOT / "evals/behavioral/reports/FINALIST.yaml"
+DEVELOPMENT_MANIFEST = ROOT / "evals/behavioral/candidates/development-v2-manifest.yaml"
+DEVELOPMENT_CASES = ROOT / "evals/behavioral/cases/development-v2-cases.yaml"
+DEVELOPMENT_CONFIG = ROOT / "evals/behavioral/development-v2-promptfooconfig.yaml"
+DEVELOPMENT_PROMPT = ROOT / "evals/behavioral/prompts/review.txt"
 ALLOWED_MODELS = {"gpt-5.6-sol", "gpt-5.6-luna"}
 FORBIDDEN_MODELS = {"gpt-6-astra"}
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -29,6 +33,16 @@ EXPECTED_SPLITS = {
 PROMOTED_SKILL_BLOB = "a92f49327db57accd965ffa9e4586d8732655916"
 SPIKE_MODEL = "muse-spark-1.3-contributor"
 SPIKE_EVAL_TIMEOUT_MS = 900_000
+DEVELOPMENT_PROMPT_SHA256 = "d66dbd7c66ea1747d64e05dad975f57afbc750ffe6c28166cd7d101cd0ca947e"
+DEVELOPMENT_CASE_IDS = {
+    "genv-pr87-first-repair-type-boundary",
+    "genv-pr90-evidence-claim",
+    "genv-pr90-synchronized-clean",
+}
+DEVELOPMENT_PROVIDER_LABELS = {
+    "development-v2-current": ("current", "current"),
+    "development-v2-evidence-claims": ("candidate", "evidence-claims-v2"),
+}
 
 
 def _load(path: Path) -> Any:
@@ -293,26 +307,268 @@ def validate_heldout(finalist_label: str, finalist_sha256: str) -> list[str]:
     return errors
 
 
+def validate_development_manifest() -> list[str]:
+    errors: list[str] = []
+    data = _load(DEVELOPMENT_MANIFEST)
+    if (
+        data.get("protocol") != "muse-adversarial-review-development-v2"
+        or data.get("semantic_evaluation_version") != "muse-review-metrics-v2"
+        or data.get("data_role") != "development"
+        or data.get("immutable") is not True
+        or data.get("hash_algorithm") != "sha256"
+    ):
+        errors.append("development manifest identity, role, immutability, or hash contract changed")
+    candidates = data.get("candidates")
+    expected_ids = {"current", "evidence-claims-v2"}
+    if (
+        not isinstance(candidates, list)
+        or len(candidates) != 2
+        or {item.get("id") for item in candidates} != expected_ids
+    ):
+        errors.append("development manifest must contain exactly current and evidence-claims-v2")
+        candidates = candidates if isinstance(candidates, list) else []
+    for item in candidates:
+        path = ROOT / str(item.get("path", ""))
+        expected = str(item.get("sha256", ""))
+        if not path.is_file() or not SHA_RE.fullmatch(expected):
+            errors.append(f"development candidate {item.get('id')}: missing file or invalid sha256")
+            continue
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected:
+            errors.append(
+                f"development candidate {item.get('id')}: hash mismatch expected {expected}, got {actual}"
+            )
+        if item.get("id") == "evidence-claims-v2":
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if not 80 <= len(lines) <= 120:
+                errors.append(f"evidence-claims-v2 must be 80-120 lines, got {len(lines)}")
+        if item.get("id") == "current":
+            blob = subprocess.run(
+                ["git", "rev-parse", "HEAD:skills/adversarial-review/SKILL.md"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            working_blob = subprocess.run(
+                ["git", "hash-object", str(path)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+            if blob != PROMOTED_SKILL_BLOB or working_blob != blob:
+                errors.append("development experiment changed the promoted adversarial-review skill")
+    runtime = data.get("tested_runtime", {})
+    if runtime.get("provider") != "muse" or runtime.get("model") != SPIKE_MODEL:
+        errors.append("development tested runtime must remain Muse/Spark")
+    grader = data.get("grader", {})
+    if grader.get("model") != "gpt-5.6-terra" or grader.get("reasoning_effort") != "high":
+        errors.append("development independent grader must remain Terra at high reasoning")
+    return errors
+
+
+def validate_development_cases() -> list[str]:
+    errors: list[str] = []
+    cases = _load(DEVELOPMENT_CASES)
+    if not isinstance(cases, list) or len(cases) != 3:
+        return ["development case pack must contain exactly three cases"]
+    ids = {case.get("metadata", {}).get("case_id") for case in cases}
+    if ids != DEVELOPMENT_CASE_IDS:
+        errors.append(f"development case ids changed: {sorted(str(item) for item in ids)}")
+    family_members: dict[str, set[str]] = {}
+    clean_controls = 0
+    for case in cases:
+        metadata = case.get("metadata", {})
+        variables = case.get("vars", {})
+        case_id = metadata.get("case_id")
+        family = metadata.get("family")
+        family_members.setdefault(str(family), set()).add(str(case_id))
+        if metadata.get("split") != "development" or metadata.get("data_role") != "development":
+            errors.append(f"{case_id}: must remain disclosed development data")
+        if metadata.get("exposure") != "disclosed-before-candidate-freeze":
+            errors.append(f"{case_id}: disclosure status changed")
+        if metadata.get("human_adjudication") is not False:
+            errors.append(f"{case_id}: must not claim human adjudication")
+        if metadata.get("gold_status") not in {
+            "independently-reproduced-development",
+            "independently-verified-clean-scope",
+        }:
+            errors.append(f"{case_id}: invalid development gold status")
+        if variables.get("source_repository") != "gen-v-research-tools":
+            errors.append(f"{case_id}: source repository changed")
+        for key in ("base_sha", "base_tree_sha", "head_sha", "head_tree_sha"):
+            if not isinstance(variables.get(key), str) or not re.fullmatch(
+                r"[0-9a-f]{40}", variables.get(key, "")
+            ):
+                errors.append(f"{case_id}: {key} must be a full lowercase SHA")
+        if variables.get("base_sha") == variables.get("head_sha"):
+            errors.append(f"{case_id}: development cases must use a nonempty change")
+        expected = variables.get("expected_verdict")
+        gold = str(variables.get("gold_findings", ""))
+        if expected == "APPROVE" and gold == "NONE":
+            clean_controls += 1
+        elif expected != "NEEDS_FIXES" or not re.search(
+            r"\((?:blocking|should-fix|low)\)", gold
+        ):
+            errors.append(f"{case_id}: defect case lacks a severity-bearing development oracle")
+    expected_pr90 = {"genv-pr90-evidence-claim", "genv-pr90-synchronized-clean"}
+    if family_members.get("genv-pr90") != expected_pr90:
+        errors.append("related PR #90 repair heads must remain one development family")
+    if clean_controls != 1:
+        errors.append("development case pack must contain exactly one scoped nonempty clean control")
+    return errors
+
+
+def validate_development_config() -> list[str]:
+    errors: list[str] = []
+    config = _load(DEVELOPMENT_CONFIG)
+    if config.get("prompts") != ["file://prompts/review.txt"]:
+        errors.append("development config must use only the canonical review prompt")
+    if (
+        not DEVELOPMENT_PROMPT.is_file()
+        or hashlib.sha256(DEVELOPMENT_PROMPT.read_bytes()).hexdigest()
+        != DEVELOPMENT_PROMPT_SHA256
+    ):
+        errors.append("canonical development review prompt content changed")
+    providers = config.get("providers", [])
+    labels = [provider.get("label") for provider in providers]
+    if len(providers) != 2 or set(labels) != set(DEVELOPMENT_PROVIDER_LABELS):
+        errors.append("development config must contain exactly two candidate providers")
+    manifest = _load(DEVELOPMENT_MANIFEST)
+    manifest_by_id = {item.get("id"): item for item in manifest.get("candidates", [])}
+    for provider in providers:
+        label = provider.get("label")
+        expected = DEVELOPMENT_PROVIDER_LABELS.get(label)
+        item = provider.get("config", {})
+        if expected and (
+            provider.get("id"), item.get("variant"), item.get("candidate_id")
+        ) != ("file://providers/muse_provider.py", *expected):
+            errors.append(f"{label}: development provider mapping changed")
+        candidate = manifest_by_id.get(item.get("candidate_id"))
+        if not candidate or item.get("candidate_sha256") != candidate.get("sha256"):
+            errors.append(f"{label}: configured candidate hash differs from development manifest")
+        expected_config = {
+            "variant": expected[0] if expected else None,
+            "candidate_id": expected[1] if expected else None,
+            "candidate_sha256": candidate.get("sha256") if candidate else None,
+            "model": SPIKE_MODEL,
+            "reasoning_effort": "high",
+            "timeout": 600_000,
+            "max_model_steps": 24,
+            "max_tool_output_bytes": 200_000,
+            "timeout_seconds": 540,
+        }
+        if item != expected_config:
+            errors.append(f"{label}: development runtime profile changed")
+    options = config.get("evaluateOptions", {})
+    if options != {"maxConcurrency": 1, "timeoutMs": SPIKE_EVAL_TIMEOUT_MS}:
+        errors.append("development concurrency or per-row timeout changed")
+    default_test = config.get("defaultTest", {})
+    default_options = default_test.get("options", {})
+    expected_grader = {
+        "id": "openai:codex-sdk:gpt-5.6-terra",
+        "config": {
+            "model_reasoning_effort": "high",
+            "sandbox_mode": "read-only",
+            "working_dir": "../..",
+        },
+    }
+    if default_options != {"disableVarExpansion": True, "provider": expected_grader}:
+        errors.append("development grader or variable-expansion boundary changed")
+    assertions = default_test.get("assert", [])
+    expected_python = {
+        "review_contract": "file://assertions/review_contract.py:assert_review_contract",
+        "verdict_accuracy": "file://assertions/review_contract.py:assert_expected_verdict",
+        "skill_observation": "file://assertions/review_contract.py:assert_skill_observation",
+        "candidate_integrity": "file://assertions/review_contract.py:assert_candidate_identity",
+        "independent_grading": "file://assertions/review_contract.py:assert_no_self_grading",
+        "evidence": "file://assertions/review_contract.py:assert_evidence",
+    }
+    expected_rubrics = {
+        "gold_recall": (
+            {"gold_findings"},
+            "73bf5bb8466548fd729a53791840e86ab8ef7abf3fc63a574bf699820084592f",
+        ),
+        "blocking_recall": (
+            {"gold_findings"},
+            "aa419e6a7a9d38a256db437fab974762b499caf84330b56965afb84e2e820df6",
+        ),
+        "supported_precision": (
+            {"resolved_findings"},
+            "7c2a3d7083ce116a587005481b49aaa14d662a69582aebaffa966f0471de48ed",
+        ),
+    }
+    if not isinstance(assertions, list) or len(assertions) != 9:
+        errors.append("development config must contain exactly six Python and three rubric assertions")
+        assertions = assertions if isinstance(assertions, list) else []
+    by_metric = {
+        item.get("metric"): item for item in assertions if isinstance(item, dict)
+    }
+    if set(by_metric) != set(expected_python) | set(expected_rubrics):
+        errors.append("development assertion metric set changed")
+    for metric, value in expected_python.items():
+        item = by_metric.get(metric, {})
+        if item != {"type": "python", "value": value, "metric": metric}:
+            errors.append(f"{metric}: development Python assertion changed")
+    for metric, (template_variables, rubric_sha256) in expected_rubrics.items():
+        item = by_metric.get(metric, {})
+        value = item.get("value")
+        observed_variables = set(
+            re.findall(r"{{\s*([a-zA-Z0-9_]+)\s*}}", value)
+        ) if isinstance(value, str) else set()
+        if (
+            item.get("type") != "llm-rubric"
+            or item.get("threshold") != 0.75
+            or observed_variables != template_variables
+            or not isinstance(value, str)
+            or hashlib.sha256(value.encode("utf-8")).hexdigest() != rubric_sha256
+            or set(item) != {"type", "metric", "threshold", "value"}
+        ):
+            errors.append(f"{metric}: development rubric contract changed")
+    if config.get("tests") != "file://cases/development-v2-cases.yaml":
+        errors.append("development config case pack changed")
+    if config.get("sharing") is not False:
+        errors.append("development result sharing must remain disabled")
+    prompt = DEVELOPMENT_PROMPT.read_text(encoding="utf-8") if DEVELOPMENT_PROMPT.is_file() else ""
+    if "gold_findings" in prompt or "resolved_findings" in prompt:
+        errors.append("candidate prompt must keep development gold grader-only")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("validate", "validate-heldout"))
+    parser.add_argument(
+        "command", choices=("validate", "validate-heldout", "validate-development")
+    )
     parser.add_argument("--finalist-label")
     parser.add_argument("--finalist-sha256")
     args = parser.parse_args()
     errors = validate_manifest() + validate_config()
     if args.command == "validate":
         errors += validate_cases()
-    else:
+    elif args.command == "validate-heldout":
         if not args.finalist_label or not args.finalist_sha256:
             errors.append("validate-heldout requires --finalist-label and --finalist-sha256")
         else:
             errors += validate_heldout(args.finalist_label, args.finalist_sha256)
+    else:
+        errors += validate_cases()
+        errors += validate_development_manifest()
+        errors += validate_development_cases()
+        errors += validate_development_config()
     if errors:
         print("SPIKE VALIDATION FAILED")
         for error in errors:
             print(f"- {error}")
         return 1
-    print("SPIKE VALIDATION PASSED: candidates, hashes, frozen splits, budgets, grader, and gold sentinels")
+    if args.command == "validate-development":
+        print(
+            "DEVELOPMENT V2 VALIDATION PASSED: frozen v1 plus two candidates, "
+            "three disclosed cases, identities, budgets, grader, and gold boundary"
+        )
+    else:
+        print("SPIKE VALIDATION PASSED: candidates, hashes, frozen splits, budgets, grader, and gold sentinels")
     return 0
 
 

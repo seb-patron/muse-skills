@@ -54,11 +54,12 @@ The first two cases replay PR #1:
 
 ## Who grades
 
-Muse is always the system under test and never grades itself. Four Python
-assertions deterministically check the JSON review contract, expected verdict,
-skill-use trace evidence, and per-finding command evidence. Two model-graded
-assertions use `openai:codex-sdk:gpt-5.6-terra` at high reasoning to score gold
-finding recall and supported precision. The grader uses an existing Codex /
+Muse is always the system under test and never grades itself. The ordinary baseline
+uses four Python assertions and two model-graded assertions. The versioned spike and
+development config use six Python assertions and three Terra rubrics, adding
+candidate identity, self-grading exclusion, and separate blocking recall. Terra runs
+at high reasoning to score gold finding recall and supported precision. The grader
+uses an existing Codex /
 ChatGPT login when no API key is configured. Override it for a comparison with
 Promptfoo's `--grader` option; do not change the tested Muse model in the same
 experiment.
@@ -179,6 +180,15 @@ Future normalization follows [`SCORING_V2.md`](SCORING_V2.md). Clean or unknown
 gold denominators are excluded from recall, and aggregates expose applicability and
 scored-row coverage. Committed v1 reports remain unchanged because their ignored raw
 outputs are unavailable for an evidence-preserving recomputation.
+
+## Development experiment v2
+
+[`DEVELOPMENT_V2.md`](DEVELOPMENT_V2.md) defines a separate current-versus-one-
+candidate experiment over two independently reproduced Gen V review defects and a
+nonempty repaired control. It preserves every frozen v1 artifact and uses the same
+native Muse provider and `muse-review-metrics-v2` normalizer. Validate it without
+inference using `npm run eval:development-v2:validate`. The six-row
+`npm run eval:development-v2` screen is a future, separately authorized live run.
 
 ## Add a case
 

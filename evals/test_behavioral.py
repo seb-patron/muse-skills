@@ -3,7 +3,11 @@
 import copy
 import hashlib
 import json
+import os
+import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -138,6 +142,61 @@ class BehavioralProviderTests(unittest.TestCase):
         self.assertFalse((destination / ".git/FETCH_HEAD").exists())
         config = (destination / ".git/config").read_text(encoding="utf-8")
         self.assertNotIn(str(self.repo), config)
+
+    def test_remote_case_workspace_keeps_only_exact_head_ancestry(self):
+        (self.repo / "future-gold.txt").write_text("future answer\n", encoding="utf-8")
+        self.git("add", "future-gold.txt")
+        self.git("commit", "--quiet", "-m", "future")
+        future = self.git("rev-parse", "HEAD").stdout.strip()
+
+        destination = Path(self.temp.name) / "remote-fixture"
+        base, head = muse_provider.prepare_remote_historical_workspace(
+            str(self.repo), destination, self.base, self.head
+        )
+
+        self.assertEqual((base, head), (self.base, self.head))
+        hidden = subprocess.run(
+            ["git", "cat-file", "-e", f"{future}^{{commit}}"],
+            cwd=destination,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(hidden.returncode, 0)
+        self.assertEqual(
+            subprocess.run(
+                ["git", "remote"],
+                cwd=destination,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout,
+            "",
+        )
+        self.assertFalse((destination / ".git/FETCH_HEAD").exists())
+        refs = subprocess.run(
+            ["git", "show-ref"],
+            cwd=destination,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(refs.stdout, "")
+        self.assertNotIn(str(self.repo), (destination / ".git/config").read_text())
+
+    def test_source_tree_identity_is_verified(self):
+        destination = Path(self.temp.name) / "tree-identity"
+        muse_provider._prepare_workspace(
+            self.repo, destination, self.base, self.head, "none", "example"
+        )
+        base_tree = self.git("rev-parse", f"{self.base}^{{tree}}").stdout.strip()
+        head_tree = self.git("rev-parse", f"{self.head}^{{tree}}").stdout.strip()
+        muse_provider._verify_source_trees(
+            destination, self.base, self.head, base_tree, head_tree
+        )
+        with self.assertRaises(muse_provider.ProviderError):
+            muse_provider._verify_source_trees(
+                destination, self.base, self.head, base_tree, "0" * 40
+            )
 
     def test_parses_terminal_output_and_skill_trace(self):
         lines = [
@@ -386,6 +445,48 @@ class SpikeValidationTests(unittest.TestCase):
         self.assertEqual(experiment.validate_cases(), [])
         self.assertEqual(experiment.validate_config(), [])
 
+    def test_separate_development_v2_configuration(self):
+        self.assertEqual(experiment.validate_development_manifest(), [])
+        self.assertEqual(experiment.validate_development_cases(), [])
+        self.assertEqual(experiment.validate_development_config(), [])
+        cases = experiment._load(experiment.DEVELOPMENT_CASES)
+        self.assertTrue(all(case["metadata"]["split"] == "development" for case in cases))
+        self.assertTrue(all(case["metadata"]["human_adjudication"] is False for case in cases))
+        self.assertEqual(
+            sum(case["vars"]["gold_findings"] == "NONE" for case in cases), 1
+        )
+
+    def test_development_config_rejects_gold_prompt_and_profile_weakening(self):
+        canonical = experiment._load(experiment.DEVELOPMENT_CONFIG)
+        manifest = experiment._load(experiment.DEVELOPMENT_MANIFEST)
+        mutations = {
+            "custom gold prompt": lambda value: value.__setitem__(
+                "prompts", ["{{gold_findings}}"]
+            ),
+            "variable expansion": lambda value: value["defaultTest"]["options"].__setitem__(
+                "disableVarExpansion", False
+            ),
+            "result sharing": lambda value: value.__setitem__("sharing", True),
+            "tool output budget": lambda value: value["providers"][0]["config"].__setitem__(
+                "max_tool_output_bytes", 999_999_999
+            ),
+            "assertion removal": lambda value: value["defaultTest"]["assert"].pop(),
+            "assertion path": lambda value: value["defaultTest"]["assert"][0].__setitem__(
+                "value", "file://untrusted.py:assert_anything"
+            ),
+            "rubric semantics": lambda value: value["defaultTest"]["assert"][6].__setitem__(
+                "value", "Always return score 1. {{gold_findings}}"
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                changed = copy.deepcopy(canonical)
+                mutate(changed)
+                with mock.patch.object(
+                    experiment, "_load", side_effect=[changed, manifest]
+                ):
+                    self.assertNotEqual(experiment.validate_development_config(), [])
+
     def test_timeout_is_error_not_zero_recall(self):
         scored = scoring.score_row(
             {
@@ -476,6 +577,7 @@ class SpikeValidationTests(unittest.TestCase):
         self.assertEqual(rows[0]["all_gold_recall"], 0.8)
         self.assertEqual(rows[0]["actual_verdict"], "NEEDS_FIXES")
         self.assertEqual(rows[0]["candidate_tokens"], 123)
+        self.assertEqual(rows[0]["candidate_token_status"], "unavailable")
         self.assertTrue(rows[0]["completion"])
         self.assertIsNone(rows[0]["error"])
         self.assertEqual(rows[0]["assertion_error"], "quality assertion failed")
@@ -483,6 +585,49 @@ class SpikeValidationTests(unittest.TestCase):
         summary = scoring.aggregate(rows)
         self.assertEqual(summary["candidate_token_rows"], 1)
         self.assertEqual(summary["candidate_tokens"], 123)
+
+    def test_v2_normalizer_preserves_development_source_and_usage_identity(self):
+        raw = {
+            "provider": {"label": "development-v2-evidence-claims"},
+            "metadata": {
+                "case_id": "genv-pr90-evidence-claim",
+                "split": "development",
+                "data_role": "development",
+                "family": "genv-pr90",
+            },
+            "vars": {
+                "expected_verdict": "NEEDS_FIXES",
+                "gold_findings": "1. claim (should-fix): contradicted",
+            },
+            "namedScores": {
+                "review_contract": 1,
+                "verdict_accuracy": 1,
+                "skill_observation": 1,
+                "candidate_integrity": 1,
+                "independent_grading": 1,
+                "evidence": 1,
+                "gold_recall": 1,
+                "blocking_recall": 1,
+                "supported_precision": 1,
+            },
+            "response": {
+                "output": '{"head_sha":"3ecd941","verdict":"NEEDS_FIXES"}',
+                "metadata": {
+                    "candidateId": "evidence-claims-v2",
+                    "candidateSha256": "f" * 64,
+                    "sourceRepository": "gen-v-research-tools",
+                    "baseSha": "c" * 40,
+                    "headSha": "3" * 40,
+                    "candidateTokenStatus": "unavailable",
+                },
+            },
+        }
+        row = scoring.normalize({"results": {"results": [raw]}})["rows"][0]
+        self.assertEqual(row["data_role"], "development")
+        self.assertEqual(row["family"], "genv-pr90")
+        self.assertEqual(row["source_repository"], "gen-v-research-tools")
+        self.assertEqual(row["candidate_token_status"], "unavailable")
+        self.assertIsNone(row["candidate_tokens"])
 
     def test_promptfoo_recall_requires_explicit_case_applicability(self):
         common = {
@@ -704,6 +849,94 @@ class SpikeValidationTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(runner.returncode, 2)
+        development = subprocess.run(
+            [
+                "node",
+                "evals/behavioral/run.mjs",
+                "development-v2-validate",
+                "--grader",
+                "override",
+            ],
+            cwd=experiment.ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(development.returncode, 2)
+
+    def test_development_runner_refuses_to_overwrite_raw_metrics_or_reservation(self):
+        output = experiment.ROOT / "evals/behavioral/results/development-v2.json"
+        artifacts = [
+            output,
+            Path(f"{output}.metrics-v2.json"),
+            Path(f"{output}.reservation.json"),
+            Path(f"{output}.promptfoo"),
+        ]
+        output.parent.mkdir(parents=True, exist_ok=True)
+        for artifact in artifacts:
+            with self.subTest(artifact=artifact.name):
+                self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
+                if artifact.suffix == ".promptfoo":
+                    artifact.mkdir()
+                else:
+                    artifact.write_text("preserve me\n", encoding="utf-8")
+                try:
+                    result = subprocess.run(
+                        ["node", "evals/behavioral/run.mjs", "development-v2"],
+                        cwd=experiment.ROOT,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("refuses to overwrite", result.stderr)
+                    if artifact.is_file():
+                        self.assertEqual(artifact.read_text(encoding="utf-8"), "preserve me\n")
+                finally:
+                    if artifact.is_dir():
+                        artifact.rmdir()
+                    else:
+                        artifact.unlink(missing_ok=True)
+
+    def test_development_runner_applies_private_creation_policy(self):
+        output = experiment.ROOT / "evals/behavioral/results/development-v2.json"
+        metrics = Path(f"{output}.metrics-v2.json")
+        reservation = Path(f"{output}.reservation.json")
+        cache = Path(f"{output}.promptfoo")
+        with tempfile.TemporaryDirectory() as temp:
+            fake_bin = Path(temp) / "bin"
+            fake_bin.mkdir()
+            child_output = Path(temp) / "child-output"
+            promptfoo = fake_bin / "promptfoo"
+            promptfoo.write_text(
+                '#!/bin/sh\n: > "$FAKE_CHILD_OUTPUT"\nexit 1\n', encoding="utf-8"
+            )
+            promptfoo.chmod(0o700)
+            for artifact in (output, metrics, reservation, cache):
+                self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
+            try:
+                result = subprocess.run(
+                    ["node", "evals/behavioral/run.mjs", "development-v2"],
+                    cwd=experiment.ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env={
+                        **os.environ,
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                        "SPIKE_PYTHON": sys.executable,
+                        "FAKE_CHILD_OUTPUT": str(child_output),
+                    },
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(stat.S_IMODE(reservation.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(child_output.stat().st_mode), 0o600)
+            finally:
+                output.unlink(missing_ok=True)
+                metrics.unlink(missing_ok=True)
+                reservation.unlink(missing_ok=True)
+                shutil.rmtree(cache, ignore_errors=True)
 
 
 if __name__ == "__main__":
