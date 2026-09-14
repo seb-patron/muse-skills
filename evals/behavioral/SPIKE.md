@@ -89,6 +89,10 @@ report quality metrics as unknown rather than zero. Deterministic aggregation an
 conversion fixtures live in [`scoring.py`](scoring.py); semantic gold matching
 remains the independent Terra rubric and requires calibration against human gold.
 
+Correction: future normalized output uses the denominator-aware
+[`muse-review-metrics-v2`](SCORING_V2.md) semantics. The frozen v1 reports and result
+identities are preserved and are not silently recomputed.
+
 ## Consultation and review contract
 
 The Codex consultation is the non-author Sol analysis recorded in the task handoff;

@@ -138,7 +138,7 @@ function verifySpikeOutput(stageName, finalistLabels) {
     );
     return false;
   }
-  const metricsOutput = `${output}.metrics.json`;
+  const metricsOutput = `${output}.metrics-v2.json`;
   const summary = spawnSync(
     process.env.SPIKE_PYTHON ?? "python3",
     process.env.SPIKE_PYTHON

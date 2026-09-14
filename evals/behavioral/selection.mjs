@@ -4,6 +4,7 @@ const SPIKE_PROVIDER_LABELS = [
   "spike-risk-first",
   "spike-upstream-adapted",
 ];
+const NORMALIZATION_ID = "muse-review-metrics-v2";
 
 function quoteRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -55,8 +56,9 @@ export function isCompletedPromptfooExit(status) {
 
 export function hasCompleteNormalizedRows(payload, expectedRows) {
   const aggregate = payload?.aggregate;
-  return aggregate?.rows === expectedRows &&
+  return payload?.normalization?.id === NORMALIZATION_ID &&
+    aggregate?.rows === expectedRows &&
     aggregate?.completed === expectedRows && aggregate?.errors === 0;
 }
 
-export { SPIKE_PROVIDER_LABELS };
+export { NORMALIZATION_ID, SPIKE_PROVIDER_LABELS };

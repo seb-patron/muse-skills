@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ REQUIRED_NAMED_SCORES = {
     "blocking_recall",
     "supported_precision",
 }
+NORMALIZATION_ID = "muse-review-metrics-v2"
 
 
 def _set(value: Any) -> set[str]:
@@ -80,6 +82,26 @@ def _candidate_tokens(raw: Mapping[str, Any]) -> int | None:
     return int(value) if isinstance(value, int) and value >= 0 else None
 
 
+def _case_recall_applicability(raw: Mapping[str, Any]) -> tuple[bool | None, bool | None]:
+    """Read recall denominators from the case contract, not provider metadata."""
+
+    variables = raw.get("vars")
+    if not isinstance(variables, Mapping):
+        return None, None
+    value = variables.get("gold_findings")
+    if not isinstance(value, str) or not value.strip():
+        return None, None
+    gold = value.strip()
+    if gold == "NONE":
+        return False, False
+    if "PENDING_HUMAN_ADJUDICATION" in gold:
+        return None, None
+    severities = re.findall(r"\((blocking|should-fix|low)\):", gold, flags=re.IGNORECASE)
+    if not severities:
+        return None, None
+    return True, any(severity.lower() == "blocking" for severity in severities)
+
+
 def _execution_error(
     raw: Mapping[str, Any], response: Mapping[str, Any], output: str
 ) -> str | None:
@@ -120,6 +142,7 @@ def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         provider_metadata = response.get("metadata") if isinstance(response.get("metadata"), Mapping) else {}
         facts = provider_metadata.get("evaluationFacts")
         facts = facts if isinstance(facts, Mapping) else {}
+        all_gold_applicable, blocking_gold_applicable = _case_recall_applicability(raw)
         output = _response_output(raw)
         execution_error = _execution_error(raw, response, output)
         completed = execution_error is None
@@ -130,10 +153,12 @@ def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "candidate_id": provider_metadata.get("candidateId") or provider.get("label"),
                 "expected_verdict": (raw.get("vars") or {}).get("expected_verdict"),
                 "actual_verdict": _actual_verdict(output),
-                "gold_ids": facts.get("gold_ids", []),
-                "blocking_gold_ids": facts.get("blocking_gold_ids", []),
-                "matched_gold_ids": facts.get("matched_gold_ids", []),
-                "matched_blocking_gold_ids": facts.get("matched_blocking_gold_ids", []),
+                "gold_ids": facts.get("gold_ids"),
+                "blocking_gold_ids": facts.get("blocking_gold_ids"),
+                "matched_gold_ids": facts.get("matched_gold_ids"),
+                "matched_blocking_gold_ids": facts.get("matched_blocking_gold_ids"),
+                "all_gold_recall_applicable": all_gold_applicable,
+                "blocking_recall_applicable": blocking_gold_applicable,
                 "blocking_finding_recall": _named_score(raw, "blocking_recall"),
                 "all_gold_recall": _named_score(raw, "gold_recall"),
                 "supported_precision": _named_score(raw, "supported_precision"),
@@ -175,20 +200,28 @@ def score_row(row: Mapping[str, Any]) -> dict[str, Any]:
     direct_blocking = _number(row.get("blocking_finding_recall"))
     direct_all = _number(row.get("all_gold_recall"))
     direct_precision = _number(row.get("supported_precision"))
+    all_gold_applicable = row.get("all_gold_recall_applicable")
+    if not isinstance(all_gold_applicable, bool):
+        all_gold_applicable = None
+    blocking_applicable = row.get("blocking_recall_applicable")
+    if not isinstance(blocking_applicable, bool):
+        blocking_applicable = None
     return {
         "case_id": row.get("case_id"),
         "candidate_id": row.get("candidate_id"),
         "completion": completed,
         "blocking_finding_recall": (
-            direct_blocking if completed and direct_blocking is not None
-            else len(matched_blocking) / len(blocking) if completed and blocking
-            else (1.0 if completed else None)
+            direct_blocking if completed and blocking_applicable is True and direct_blocking is not None
+            else len(matched_blocking) / len(blocking) if completed and blocking_applicable is True and blocking
+            else None
         ),
         "all_gold_recall": (
-            direct_all if completed and direct_all is not None
-            else len(matched) / len(gold) if completed and gold
-            else (1.0 if completed else None)
+            direct_all if completed and all_gold_applicable is True and direct_all is not None
+            else len(matched) / len(gold) if completed and all_gold_applicable is True and gold
+            else None
         ),
+        "blocking_recall_applicable": blocking_applicable,
+        "all_gold_recall_applicable": all_gold_applicable,
         "supported_precision": direct_precision if completed and direct_precision is not None else precision if completed else None,
         "false_approval": bool(completed and expected == "NEEDS_FIXES" and actual == "APPROVE"),
         "verdict_accuracy": (actual == expected) if completed and expected in {"APPROVE", "NEEDS_FIXES"} else None,
@@ -214,7 +247,19 @@ def aggregate(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         "errors": sum(not item["completion"] for item in scored),
         "false_approvals": sum(bool(item["false_approval"]) for item in scored),
         "blocking_finding_recall": mean("blocking_finding_recall"),
+        "blocking_recall_applicable_rows": sum(
+            item["blocking_recall_applicable"] is True for item in scored
+        ),
+        "blocking_recall_scored_rows": sum(
+            isinstance(item.get("blocking_finding_recall"), (int, float)) for item in scored
+        ),
         "all_gold_recall": mean("all_gold_recall"),
+        "all_gold_recall_applicable_rows": sum(
+            item["all_gold_recall_applicable"] is True for item in scored
+        ),
+        "all_gold_recall_scored_rows": sum(
+            isinstance(item.get("all_gold_recall"), (int, float)) for item in scored
+        ),
         "supported_precision": mean("supported_precision"),
         "verdict_accuracy": mean("verdict_accuracy"),
         "latency_ms": mean("latency_ms"),
@@ -227,17 +272,28 @@ def aggregate(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def normalize(payload: Mapping[str, Any]) -> dict[str, Any]:
+    rows = promptfoo_rows(payload)
+    return {
+        "normalization": {
+            "id": NORMALIZATION_ID,
+            "recall_semantics": "not-applicable and unknown denominators are excluded",
+        },
+        "rows": [score_row(row) for row in rows],
+        "aggregate": aggregate(rows),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Normalize raw Promptfoo spike results")
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     payload = json.loads(args.input.read_text(encoding="utf-8"))
-    rows = promptfoo_rows(payload)
-    result = {"rows": [score_row(row) for row in rows], "aggregate": aggregate(rows)}
+    result = normalize(payload)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"normalized {len(rows)} Promptfoo rows")
+    print(f"normalized {len(result['rows'])} Promptfoo rows with {NORMALIZATION_ID}")
     return 0
 
 

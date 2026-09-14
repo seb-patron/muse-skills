@@ -312,7 +312,7 @@ def main() -> int:
         for error in errors:
             print(f"- {error}")
         return 1
-    print("SPIKE VALIDATION PASSED: candidates, hashes, frozen splits, budgets, grader, and gold isolation")
+    print("SPIKE VALIDATION PASSED: candidates, hashes, frozen splits, budgets, grader, and gold sentinels")
     return 0
 
 
