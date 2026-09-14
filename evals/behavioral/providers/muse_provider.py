@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -28,7 +30,12 @@ except ImportError:  # Promptfoo loads provider files outside their package.
         validate_skill_name,
     )
 
-VARIANTS = {"none", "current"}
+VARIANTS = {"none", "current", "candidate"}
+CANDIDATE_PATHS = {
+    "minimal": Path("evals/behavioral/candidates/minimal.md"),
+    "risk-first": Path("evals/behavioral/candidates/risk-first.md"),
+    "upstream-adapted": Path("evals/behavioral/candidates/upstream-adapted.md"),
+}
 CONTROL_SKILL = """---
 name: {skill_name}
 description: Evaluation control placeholder with no review instructions. Do not load it.
@@ -47,6 +54,7 @@ def _prepare_workspace(
     head_revision: str,
     variant: str,
     skill_name: str,
+    candidate_id: str | None = None,
 ) -> tuple[str, str]:
     if variant not in VARIANTS:
         raise ProviderError(f"unknown variant {variant!r}; expected one of {sorted(VARIANTS)}")
@@ -60,8 +68,15 @@ def _prepare_workspace(
 
     target = destination / ".agents" / "skills" / skill_name / "SKILL.md"
     target.parent.mkdir(parents=True, exist_ok=True)
-    if variant == "current":
-        source = repo_root / "skills" / skill_name / "SKILL.md"
+    if variant in {"current", "candidate"}:
+        if variant == "current":
+            source = repo_root / "skills" / skill_name / "SKILL.md"
+        else:
+            if candidate_id not in CANDIDATE_PATHS:
+                raise ProviderError(
+                    f"unknown candidate {candidate_id!r}; expected one of {sorted(CANDIDATE_PATHS)}"
+                )
+            source = repo_root / CANDIDATE_PATHS[candidate_id]
         if not source.is_file():
             raise ProviderError(f"current skill does not exist: {source}")
         shutil.copyfile(source, target)
@@ -73,6 +88,108 @@ def _prepare_workspace(
         handle.write("\n.agents/\n")
 
     return base_sha, head_sha
+
+
+def _candidate_identity(
+    repo_root: Path,
+    variant: str,
+    skill_name: str,
+    candidate_id: str | None,
+    expected_sha256: str | None = None,
+) -> dict[str, str | None]:
+    if variant == "none":
+        return {
+            "candidateId": None,
+            "candidatePath": None,
+            "candidateSha256": None,
+            "candidateDelivery": "withheld",
+        }
+    if variant == "current":
+        path = Path("skills") / skill_name / "SKILL.md"
+        resolved_id = "current"
+    elif variant == "candidate" and candidate_id in CANDIDATE_PATHS:
+        path = CANDIDATE_PATHS[candidate_id]
+        resolved_id = candidate_id
+    else:
+        raise ProviderError(f"cannot resolve candidate identity for variant={variant!r}, id={candidate_id!r}")
+    source = repo_root / path
+    if not source.is_file():
+        raise ProviderError(f"candidate source does not exist: {source}")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    if expected_sha256 and digest != expected_sha256:
+        raise ProviderError(
+            f"candidate {resolved_id} hash mismatch: expected {expected_sha256}, got {digest}"
+        )
+    return {
+        "candidateId": resolved_id,
+        "candidatePath": str(path),
+        "candidateSha256": digest,
+        "candidateDelivery": "project-skill",
+    }
+
+
+def _activate_skill_prompt(prompt: str, skill_name: str) -> str:
+    return (
+        f"Call the read_skill tool for `{skill_name}` before inspecting the change, "
+        "then follow that project skill for this task.\n\n"
+        f"{prompt}"
+    )
+
+
+def _run_muse(
+    args: list[str], workspace: Path, timeout_seconds: int, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """Run Muse with a killable process group so timeouts cannot leak pipe holders."""
+
+    process = subprocess.Popen(
+        args,
+        cwd=workspace,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+        env=env,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            args,
+            timeout_seconds,
+            output=stdout or exc.output,
+            stderr=stderr or exc.stderr,
+        ) from None
+    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
+def _usage_from_event(event: dict[str, Any]) -> dict[str, int]:
+    payload = event.get("payload")
+    sources = [event, payload] if isinstance(payload, dict) else [event]
+    for source in sources:
+        for key in ("usage", "token_usage", "tokenUsage"):
+            usage = source.get(key)
+            if not isinstance(usage, dict):
+                continue
+            values = {
+                str(name): int(value)
+                for name, value in usage.items()
+                if isinstance(name, str) and isinstance(value, int) and value >= 0
+            }
+            prompt = values.get("prompt", values.get("input_tokens", values.get("input", 0)))
+            completion = values.get(
+                "completion", values.get("output_tokens", values.get("output", 0))
+            )
+            total = values.get("total", values.get("total_tokens", prompt + completion))
+            return {"prompt": prompt, "completion": completion, "total": total}
+    return {}
 
 
 def _parse_muse_stream(stdout: str, skill_name: str) -> dict[str, Any]:
@@ -121,19 +238,24 @@ def _parse_muse_stream(stdout: str, skill_name: str) -> dict[str, Any]:
             break
 
     models: set[str] = set()
+    usage: dict[str, int] = {}
     for event in events:
         payload = event.get("payload")
-        if isinstance(payload, dict):
+        for source in (event, payload) if isinstance(payload, dict) else (event,):
             for key in ("model", "model_id", "modelId"):
-                value = payload.get(key)
+                value = source.get(key)
                 if isinstance(value, str) and value:
                     models.add(value)
+        event_usage = _usage_from_event(event)
+        if event_usage:
+            usage = event_usage
 
     return {
         "output": terminal_text,
         "eventCount": len(events),
         "skillObserved": observed,
         "models": sorted(models),
+        "usage": usage,
     }
 
 
@@ -141,6 +263,9 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
     config = options.get("config") or {}
     variables = context.get("vars") or {}
     variant = str(config.get("variant", "none"))
+    candidate_id = config.get("candidate_id")
+    if candidate_id is not None:
+        candidate_id = str(candidate_id)
     skill_name = str(variables.get("skill_name", ""))
     muse_binary = str(config.get("muse_binary") or os.environ.get("MUSE_EVAL_BINARY") or "muse")
     timeout_seconds = int(config.get("timeout_seconds", 1200))
@@ -152,8 +277,19 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
         if shutil.which(muse_binary) is None and not Path(muse_binary).is_file():
             raise ProviderError(f"Muse executable not found: {muse_binary}")
 
-        with tempfile.TemporaryDirectory(prefix="muse-skill-eval-") as temp:
+        # Muse's session lease is workspace-root scoped and rejects disposable
+        # clones created outside the configured project root. Keep the clone
+        # disposable, but place it under that permitted root so the same provider
+        # works in headless desktop runs and in the historical fixture tests.
+        with tempfile.TemporaryDirectory(prefix=".muse-skill-eval-", dir=repo_root) as temp:
             workspace = Path(temp) / "repo"
+            identity = _candidate_identity(
+                repo_root,
+                variant,
+                skill_name,
+                candidate_id,
+                str(config.get("candidate_sha256")) if config.get("candidate_sha256") else None,
+            )
             base_sha, head_sha = _prepare_workspace(
                 repo_root,
                 workspace,
@@ -161,11 +297,27 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 str(variables.get("head_sha", "")),
                 variant,
                 skill_name,
+                candidate_id,
             )
+
+            spike_run = "candidate_id" in config
+            configured_model = str(config.get("model") or "")
+            override_model = os.environ.get("MUSE_EVAL_MODEL")
+            if spike_run and override_model and override_model != configured_model:
+                raise ProviderError(
+                    "MUSE_EVAL_MODEL is disabled for the frozen spike; use the configured "
+                    f"model {configured_model!r}"
+                )
+            if not configured_model and not spike_run:
+                configured_model = override_model or ""
+            if not configured_model and spike_run:
+                raise ProviderError("spike provider requires an explicit Muse model")
 
             args = [
                 muse_binary,
                 "exec",
+                "--provider",
+                "meta",
                 "--json",
                 "--workspace",
                 str(workspace),
@@ -183,32 +335,17 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 "--reasoning-effort",
                 str(config.get("reasoning_effort", "high")),
             ]
-            model = os.environ.get("MUSE_EVAL_MODEL") or config.get("model")
-            if model:
-                args.extend(["--model", str(model)])
-            if variant == "current":
-                prompt = (
-                    f"Call the read_skill tool for `{skill_name}` before inspecting the change, "
-                    "then follow that project skill for this task.\n\n"
-                    f"{prompt}"
-                )
+            if configured_model:
+                args.extend(["--model", configured_model])
+            if variant in {"current", "candidate"}:
+                prompt = _activate_skill_prompt(prompt, skill_name)
             args.append(prompt)
 
             env = os.environ.copy()
             env.update({"MUSE_NO_AUTO_UPDATE": "1", "NO_COLOR": "1"})
             started = time.monotonic()
             try:
-                result = subprocess.run(
-                    args,
-                    cwd=workspace,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout_seconds,
-                    check=False,
-                    env=env,
-                )
+                result = _run_muse(args, workspace, timeout_seconds, env)
             except subprocess.TimeoutExpired as exc:
                 return {"error": f"Muse timed out after {timeout_seconds}s: {exc}"}
             latency_ms = round((time.monotonic() - started) * 1000)
@@ -218,24 +355,47 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 return {"error": f"Muse exited {result.returncode}: {detail}"}
             if not parsed["output"].strip():
                 return {"error": "Muse completed without a terminal review output"}
+            if spike_run and variant in {"current", "candidate"} and not parsed["skillObserved"]:
+                return {"error": "Muse completed without observing the delivered project skill"}
+            if spike_run and not parsed["models"]:
+                return {"error": "Muse completed without observed model telemetry"}
+            if spike_run and parsed["models"] != [configured_model]:
+                return {
+                    "error": (
+                        f"Muse model telemetry mismatch: expected {configured_model}, "
+                        f"observed {parsed['models']}"
+                    )
+                }
 
-            return {
+            response = {
                 "output": parsed["output"],
                 "latencyMs": latency_ms,
                 "cached": False,
                 "metadata": {
                     "runtime": "muse",
                     "variant": variant,
-                    "skillName": skill_name if variant == "current" else None,
+                    "skillName": skill_name if variant != "none" else None,
+                    "candidateId": identity["candidateId"],
+                    "candidatePath": identity["candidatePath"],
+                    "candidateSha256": identity["candidateSha256"],
+                    "candidateDelivery": identity["candidateDelivery"],
+                    "skillDelivery": "project-skill" if variant != "none" else "withheld",
+                    "skillActivation": "explicit-read_skill" if variant != "none" else "withheld",
                     "skillObserved": parsed["skillObserved"],
                     "baseSha": base_sha,
                     "headSha": head_sha,
                     "museModels": parsed["models"],
+                    "museExpectedModel": configured_model or None,
+                    "museTokenUsage": parsed["usage"] or None,
+                    "candidateTokenStatus": "observed" if parsed["usage"] else "unavailable",
                     "eventCount": parsed["eventCount"],
                     "museExitCode": result.returncode,
                     "controlMode": "project-placeholder" if variant == "none" else None,
                     "stderrTail": result.stderr[-1000:],
                 },
             }
+            if parsed["usage"]:
+                response["tokenUsage"] = parsed["usage"]
+            return response
     except (OSError, ProviderError, ValueError) as exc:
         return {"error": str(exc)}

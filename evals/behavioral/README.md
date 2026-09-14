@@ -29,14 +29,17 @@ Each Promptfoo row runs the same task twice:
 2. `muse-current-adversarial-review` checks out the same head and stages the
    current `skills/<skill_name>/SKILL.md` under `.agents/skills/`.
 
-The Python provider creates a local, disposable clone, checks that the base is
-an ancestor of the head, disables web tools and network access, excludes
+The Python provider creates a local, disposable repository containing only the
+selected head and its ancestor history, checks that the base is an ancestor of the
+head, disables web tools and network access, excludes
 foreign personal context, and runs `muse exec --json`. Project scope takes
 precedence over user scope in Muse, so the placeholder prevents a user-installed
 copy of the tested skill from contaminating the control without changing the
 developer's Muse configuration. The treatment replaces that placeholder with
-the current skill body. The historical heads in the first suite predate these
-labels, so the agent cannot read its answers from the fixture. Raw temporary
+the current skill body. The historical checkout contains no later source refs,
+tags, objects, remotes, or alternates, so later evaluation files are not
+recoverable through its Git database. This Git boundary is distinct from broader
+host and tool isolation. Raw temporary
 workspaces are deleted after each row.
 
 The first two cases replay PR #1:
@@ -78,15 +81,35 @@ npm install
 npm run eval:behavioral:validate
 npm run eval:behavioral:smoke   # one pass per case/provider
 npm run eval:behavioral         # three passes per case/provider
+npm run eval:spike:validate
+npm run eval:spike:probe        # one frozen candidate/case plus grading
+npm run eval:spike:train        # four candidates across the three train cases
 ```
 
-Set `MUSE_EVAL_MODEL` to pin the tested Muse model. The provider records model
-ids surfaced by Muse, exact base/head SHAs, duration, event count, and whether
-Muse emitted a successful `read_skill` result for the requested project skill.
+The ordinary behavioral provider accepts `MUSE_EVAL_MODEL` for baseline runs. The
+evidence-backed spike ignores divergent overrides and requires its configured
+`muse-spark-1.3-contributor` model to appear in runtime telemetry. The provider
+records model ids surfaced by Muse, exact base/head SHAs, duration, event count,
+and whether Muse emitted a successful `read_skill` result for the requested project
+skill.
 The skill condition explicitly requests that tool call and fails its
 deterministic assertion if activation is not observed. Promptfoo telemetry and
 update checks are disabled by the launcher. Raw results are written to the ignored
 `evals/behavioral/results/` directory.
+
+The spike pins target-provider concurrency to one and sets a 900-second eval-step
+timeout. In Promptfoo 0.123, the presence of that timeout disables provider-grouped
+deferred grading, so each slow Muse result reaches its Terra rubrics before the next
+Muse row starts. The timer bounds the complete Muse-plus-Terra row; its 900-second
+budget exceeds the Muse provider's 540-second process limit. Promptfoo may evaluate
+the three rubrics for the row concurrently. `eval:spike:probe` bounds the wiring
+check to one candidate/case row.
+
+Promptfoo exits with status 100 when a completed row fails a quality assertion. The
+spike runner accepts that one status long enough to verify exact row cardinality and
+write normalized metrics; other nonzero statuses remain infrastructure failures.
+The converter distinguishes a fully graded quality failure from a provider error,
+timeout, missing rubric, or malformed review contract.
 
 The smoke run is for wiring and manual inspection. Treat the three-repeat run,
 not a single lucky completion, as the first comparison baseline.
@@ -103,7 +126,7 @@ grading contract through two Codex reference agents:
 
 Each model has a control that explicitly withholds repository skills and a
 treatment that injects the exact current `SKILL.md` into the prompt. The custom
-provider uses an ephemeral Codex run in its own disposable historical clone.
+provider uses an ephemeral Codex run in its own bounded-history repository.
 Workspace writes are enabled there so mutation probes can run, while network
 and web search are disabled; the source checkout is never writable. The run
 also ignores user configuration and repository rules and records model, effort,
@@ -128,6 +151,34 @@ behavior, and skill-delivery mechanism all change together. The matrix cannot,
 by itself, prove that a miss is caused only by Muse Spark's weights or only by
 the prompt. See [`CROSS_MODEL_BASELINE.md`](CROSS_MODEL_BASELINE.md) for the
 recorded preliminary run.
+
+## Evidence-backed spike
+
+The separate four-candidate experiment is documented in [`SPIKE.md`](SPIKE.md).
+It preserves the current skill, adds minimal/risk-first/upstream-adapted prompt
+candidates under `candidates/`, verifies their SHA-256 identities before delivery,
+and keeps the eight-case corpus and frozen train/validation/held-out assignments in
+`cases/spike_cases.yaml`. Validate its configuration without model calls:
+
+```sh
+uv run --with PyYAML==6.0.3 python evals/behavioral/experiment.py validate
+npm run eval:spike:validate
+```
+
+The live sequence is bounded: one train run per candidate, three validation repeats
+for exactly two finalists, then one held-out run only after human gold is
+adjudicated and one finalist ID/hash is frozen. Every spike stage runs the structural
+preflight, filters by `metadata.split`, checks its exact row/provider count, and
+writes a deterministic `.metrics-v2.json` normalization beside the raw Promptfoo
+output. `spike-heldout` is locked by default. The independent grader remains
+`openai:codex-sdk:gpt-5.6-terra` at high reasoning; the tested Muse model is
+`muse-spark-1.3-contributor`. The spike does not change the promoted skill or the
+historical baseline configs.
+
+Future normalization follows [`SCORING_V2.md`](SCORING_V2.md). Clean or unknown
+gold denominators are excluded from recall, and aggregates expose applicability and
+scored-row coverage. Committed v1 reports remain unchanged because their ignored raw
+outputs are unavailable for an evidence-preserving recomputation.
 
 ## Add a case
 
