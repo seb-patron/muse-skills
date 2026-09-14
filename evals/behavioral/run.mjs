@@ -19,6 +19,7 @@ const crossModelOutput = "evals/behavioral/results/cross-model-latest.json";
 const spikeConfig = "evals/behavioral/spike-promptfooconfig.yaml";
 const spikeScoring = "evals/behavioral/scoring.py";
 const developmentConfig = "evals/behavioral/development-v2-promptfooconfig.yaml";
+const developmentV3Config = "evals/behavioral/development-v3-promptfooconfig.yaml";
 
 const spikeStages = {
   "spike-probe": {
@@ -67,6 +68,22 @@ const developmentStages = {
     providers: ["development-v2-current", "development-v2-evidence-claims"],
     expectedRows: 6,
     output: "evals/behavioral/results/development-v2.json",
+    config: developmentConfig,
+    preflight: "validate-development",
+  },
+  "development-v3": {
+    split: "development",
+    cases: [
+      "genv-pr87-first-repair-type-boundary",
+      "genv-pr90-evidence-claim",
+      "genv-pr90-synchronized-clean",
+    ],
+    repeat: 1,
+    providers: ["development-v3-current", "development-v3-evidence-claims"],
+    expectedRows: 6,
+    output: "evals/behavioral/results/development-v3.json",
+    config: developmentV3Config,
+    preflight: "validate-development-v3",
   },
 };
 
@@ -125,6 +142,7 @@ const commands = {
   ],
   "spike-validate": ["validate", "config", "-c", spikeConfig],
   "development-v2-validate": ["validate", "config", "-c", developmentConfig],
+  "development-v3-validate": ["validate", "config", "-c", developmentV3Config],
 };
 
 for (const [stage, settings] of Object.entries(spikeStages)) {
@@ -142,7 +160,7 @@ for (const [stage, settings] of Object.entries(spikeStages)) {
 
 for (const [stage, settings] of Object.entries(developmentStages)) {
   commands[stage] = [
-    "eval", "-c", developmentConfig, "--no-cache", "--repeat", String(settings.repeat),
+    "eval", "-c", settings.config, "--no-cache", "--repeat", String(settings.repeat),
     "--filter-metadata", `split=${settings.split}`, "-o", settings.output,
   ];
 }
@@ -231,7 +249,8 @@ function verifyExperimentOutput(stageName, settings, finalistLabels) {
 }
 
 const isSpike = mode === "spike-validate" || mode in spikeStages;
-const isDevelopment = mode === "development-v2-validate" || mode in developmentStages;
+const isDevelopment = mode === "development-v2-validate" ||
+  mode === "development-v3-validate" || mode in developmentStages;
 const isManagedExperiment = isSpike || isDevelopment;
 let finalistLabels;
 if (mode in developmentStages) {
@@ -239,7 +258,7 @@ if (mode in developmentStages) {
   const existing = existingDevelopmentArtifacts(developmentStages[mode]);
   if (existing.length > 0) {
     console.error(
-      `development-v2 refuses to overwrite prior or partial attempt artifacts: ${existing.join(", ")}`,
+      `${mode} refuses to overwrite prior or partial attempt artifacts: ${existing.join(", ")}`,
     );
     process.exit(2);
   }
@@ -281,17 +300,20 @@ if (isSpike) {
 }
 if (isDevelopment) {
   if (extraArgs.length > 0) {
-    console.error("development-v2 modes reject extra Promptfoo arguments so the pinned profile and row contract cannot be overridden");
+    console.error("development modes reject extra Promptfoo arguments so the pinned profile and row contract cannot be overridden");
     process.exit(2);
   }
-  if (!runExperimentPreflight(["validate-development"])) process.exit(1);
+  const preflight = mode in developmentStages
+    ? developmentStages[mode].preflight
+    : mode === "development-v3-validate" ? "validate-development-v3" : "validate-development";
+  if (!runExperimentPreflight([preflight])) process.exit(1);
   if (mode in developmentStages) {
     const reservation = reserveDevelopmentOutput(mode, developmentStages[mode]);
     if (!reservation.ok) {
-      console.error(`development-v2 did not start: ${reservation.reason}`);
+      console.error(`${mode} did not start: ${reservation.reason}`);
       process.exit(2);
     }
-    console.log(`development-v2 reserved result custody at ${reservation.reservation}`);
+    console.log(`${mode} reserved result custody at ${reservation.reservation}`);
   }
 }
 
