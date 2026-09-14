@@ -94,6 +94,51 @@ class BehavioralProviderTests(unittest.TestCase):
                 self.repo, Path(self.temp.name) / "wrong", self.head, self.base, "none", "example"
             )
 
+    def test_historical_workspace_excludes_later_objects_refs_and_source_recovery(self):
+        (self.repo / "future-gold.txt").write_text("future answer\n", encoding="utf-8")
+        self.git("add", "future-gold.txt")
+        self.git("commit", "--quiet", "-m", "future")
+        future = self.git("rev-parse", "HEAD").stdout.strip()
+        self.git("tag", "future-release")
+
+        destination = Path(self.temp.name) / "bounded-history"
+        base, head = muse_provider._prepare_workspace(
+            self.repo, destination, self.base, self.head, "none", "example"
+        )
+
+        self.assertEqual((base, head), (self.base, self.head))
+        ancestry = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", base, head], cwd=destination, check=False
+        )
+        self.assertEqual(ancestry.returncode, 0)
+        changed = subprocess.run(
+            ["git", "diff", "--name-only", base, head],
+            cwd=destination,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(changed.stdout.strip(), "value.txt")
+        hidden = subprocess.run(
+            ["git", "cat-file", "-e", f"{future}^{{commit}}"],
+            cwd=destination,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(hidden.returncode, 0)
+        refs = subprocess.run(
+            ["git", "show-ref"], cwd=destination, capture_output=True, text=True, check=False
+        )
+        self.assertEqual(refs.stdout, "")
+        remotes = subprocess.run(
+            ["git", "remote"], cwd=destination, capture_output=True, text=True, check=True
+        )
+        self.assertEqual(remotes.stdout, "")
+        self.assertFalse((destination / ".git/objects/info/alternates").exists())
+        self.assertFalse((destination / ".git/FETCH_HEAD").exists())
+        config = (destination / ".git/config").read_text(encoding="utf-8")
+        self.assertNotIn(str(self.repo), config)
+
     def test_parses_terminal_output_and_skill_trace(self):
         lines = [
             {
@@ -351,6 +396,8 @@ class SpikeValidationTests(unittest.TestCase):
                 "gold_ids": ["bug"],
                 "blocking_gold_ids": ["bug"],
                 "matched_gold_ids": [],
+                "all_gold_recall_applicable": True,
+                "blocking_recall_applicable": True,
                 "completion": False,
                 "error": "timeout",
                 "latency_ms": 540000,
@@ -361,7 +408,7 @@ class SpikeValidationTests(unittest.TestCase):
         self.assertIsNone(scored["all_gold_recall"])
         self.assertIsNone(scored["verdict_accuracy"])
 
-    def test_empty_review_precision_is_vacuous_but_verdict_still_scores(self):
+    def test_empty_gold_recall_is_not_applicable_but_verdict_still_scores(self):
         scored = scoring.score_row(
             {
                 "case_id": "clean",
@@ -371,12 +418,16 @@ class SpikeValidationTests(unittest.TestCase):
                 "gold_ids": [],
                 "blocking_gold_ids": [],
                 "matched_gold_ids": [],
+                "all_gold_recall_applicable": False,
+                "blocking_recall_applicable": False,
                 "actionable_findings": 0,
                 "supported_findings": 0,
                 "completion": True,
             }
         )
-        self.assertEqual(scored["all_gold_recall"], 1.0)
+        self.assertIsNone(scored["all_gold_recall"])
+        self.assertIsNone(scored["blocking_finding_recall"])
+        self.assertFalse(scored["all_gold_recall_applicable"])
         self.assertIsNone(scored["supported_precision"])
         self.assertTrue(scored["verdict_accuracy"])
 
@@ -387,7 +438,10 @@ class SpikeValidationTests(unittest.TestCase):
                     {
                         "provider": {"label": "spike-risk-first"},
                         "metadata": {"case_id": "broken", "split": "train"},
-                        "vars": {"expected_verdict": "NEEDS_FIXES"},
+                        "vars": {
+                            "expected_verdict": "NEEDS_FIXES",
+                            "gold_findings": "1. bug (blocking): breaks behavior",
+                        },
                         "namedScores": {
                             "review_contract": 1,
                             "verdict_accuracy": 1,
@@ -430,6 +484,100 @@ class SpikeValidationTests(unittest.TestCase):
         self.assertEqual(summary["candidate_token_rows"], 1)
         self.assertEqual(summary["candidate_tokens"], 123)
 
+    def test_promptfoo_recall_requires_explicit_case_applicability(self):
+        common = {
+            "provider": {"label": "spike-current"},
+            "metadata": {"case_id": "case", "split": "train"},
+            "namedScores": {
+                "review_contract": 1,
+                "verdict_accuracy": 1,
+                "skill_observation": 1,
+                "candidate_integrity": 1,
+                "independent_grading": 1,
+                "evidence": 1,
+                "gold_recall": 1,
+                "blocking_recall": 1,
+                "supported_precision": 1,
+            },
+            "response": {
+                "output": '{"head_sha":"abcdef1","verdict":"APPROVE","summary":"ok","findings":[],"checks":[],"unrun":[],"revision_rounds":"0/3"}',
+                "metadata": {"candidateId": "current"},
+            },
+        }
+        unknown = copy.deepcopy(common)
+        unknown["vars"] = {"expected_verdict": "APPROVE"}
+        clean = copy.deepcopy(common)
+        clean["vars"] = {"expected_verdict": "APPROVE", "gold_findings": "NONE"}
+        defect = copy.deepcopy(common)
+        defect["vars"] = {
+            "expected_verdict": "NEEDS_FIXES",
+            "gold_findings": "1. defect (blocking): concrete failure",
+        }
+
+        rows = scoring.promptfoo_rows({"results": {"results": [unknown, clean, defect]}})
+        scored = [scoring.score_row(row) for row in rows]
+        self.assertIsNone(scored[0]["all_gold_recall"])
+        self.assertIsNone(scored[1]["all_gold_recall"])
+        self.assertEqual(scored[2]["all_gold_recall"], 1.0)
+        self.assertEqual(scored[2]["blocking_finding_recall"], 1.0)
+        summary = scoring.aggregate(rows)
+        self.assertEqual(summary["all_gold_recall_applicable_rows"], 1)
+        self.assertEqual(summary["all_gold_recall_scored_rows"], 1)
+        self.assertEqual(summary["blocking_recall_applicable_rows"], 1)
+        self.assertEqual(summary["blocking_recall_scored_rows"], 1)
+        normalized = scoring.normalize({"results": {"results": [defect]}})
+        self.assertEqual(normalized["normalization"]["id"], "muse-review-metrics-v2")
+        self.assertEqual(normalized["aggregate"]["all_gold_recall_scored_rows"], 1)
+
+    def test_explicit_unknown_gold_cannot_fall_back_to_provider_facts(self):
+        common = {
+            "provider": {"label": "spike-current"},
+            "metadata": {"case_id": "unknown", "split": "heldout"},
+            "namedScores": {
+                "review_contract": 1,
+                "verdict_accuracy": 1,
+                "skill_observation": 1,
+                "candidate_integrity": 1,
+                "independent_grading": 1,
+                "evidence": 1,
+                "gold_recall": 1,
+                "blocking_recall": 1,
+                "supported_precision": 1,
+            },
+            "response": {
+                "output": '{"head_sha":"abcdef1","verdict":"APPROVE","summary":"ok","findings":[],"checks":[],"unrun":[],"revision_rounds":"0/3"}',
+                "metadata": {
+                    "candidateId": "current",
+                    "evaluationFacts": {
+                        "gold_ids": ["secret"],
+                        "blocking_gold_ids": ["secret"],
+                        "matched_gold_ids": ["secret"],
+                        "matched_blocking_gold_ids": ["secret"],
+                    },
+                },
+            },
+        }
+        pending = copy.deepcopy(common)
+        pending["vars"] = {"gold_findings": "PENDING_HUMAN_ADJUDICATION"}
+        blank = copy.deepcopy(common)
+        blank["vars"] = {"gold_findings": "   "}
+        malformed = copy.deepcopy(common)
+        malformed["vars"] = {"gold_findings": "a finding without a severity contract"}
+
+        rows = scoring.promptfoo_rows(
+            {"results": {"results": [pending, blank, malformed]}}
+        )
+        scored = [scoring.score_row(row) for row in rows]
+        self.assertTrue(all(row["all_gold_recall"] is None for row in scored))
+        self.assertTrue(all(row["blocking_finding_recall"] is None for row in scored))
+        self.assertTrue(all(row["all_gold_recall_applicable"] is None for row in scored))
+        self.assertTrue(all(row["blocking_recall_applicable"] is None for row in scored))
+        summary = scoring.aggregate(rows)
+        self.assertEqual(summary["all_gold_recall_applicable_rows"], 0)
+        self.assertEqual(summary["all_gold_recall_scored_rows"], 0)
+        self.assertEqual(summary["blocking_recall_applicable_rows"], 0)
+        self.assertEqual(summary["blocking_recall_scored_rows"], 0)
+
     def test_finalist_selection_is_exactly_two_provider_labels(self):
         script = """
           import { parseFinalists, selectProviderLabels } from './evals/behavioral/selection.mjs';
@@ -439,8 +587,10 @@ class SpikeValidationTests(unittest.TestCase):
           const module = await import('./evals/behavioral/selection.mjs');
           if (!module.isCompletedPromptfooExit(0) || !module.isCompletedPromptfooExit(100)) process.exit(4);
           if (module.isCompletedPromptfooExit(1) || module.isCompletedPromptfooExit(130)) process.exit(5);
-          if (!module.hasCompleteNormalizedRows({aggregate:{rows:1,completed:1,errors:0}}, 1)) process.exit(6);
-          if (module.hasCompleteNormalizedRows({aggregate:{rows:1,completed:0,errors:1}}, 1)) process.exit(7);
+          const identity = {normalization:{id:module.NORMALIZATION_ID}};
+          if (!module.hasCompleteNormalizedRows({...identity,aggregate:{rows:1,completed:1,errors:0}}, 1)) process.exit(6);
+          if (module.hasCompleteNormalizedRows({aggregate:{rows:1,completed:1,errors:0}}, 1)) process.exit(7);
+          if (module.hasCompleteNormalizedRows({...identity,aggregate:{rows:1,completed:0,errors:1}}, 1)) process.exit(8);
           let rejected = false;
           try { parseFinalists('spike-current,spike-current'); } catch { rejected = true; }
           if (!rejected) process.exit(3);

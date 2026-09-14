@@ -59,16 +59,36 @@ def prepare_historical_workspace(
     if ancestry.returncode != 0:
         raise ProviderError(f"base {base_sha} is not an ancestor of head {head_sha}")
 
-    clone = run(
-        ["git", "clone", "--quiet", "--no-hardlinks", "--no-checkout", str(repo_root), str(destination)],
-        repo_root,
+    initialized = run(["git", "init", "--quiet", str(destination)], repo_root)
+    if initialized.returncode != 0:
+        raise ProviderError(initialized.stderr.strip() or "fixture repository initialization failed")
+    fetched = run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "-c",
+            "fetch.writeCommitGraph=false",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            str(repo_root),
+            head_sha,
+        ],
+        destination,
     )
-    if clone.returncode != 0:
-        raise ProviderError(clone.stderr.strip() or "local fixture clone failed")
+    if fetched.returncode != 0:
+        raise ProviderError(fetched.stderr.strip() or "allowed fixture history fetch failed")
     checkout = run(["git", "checkout", "--quiet", "--detach", head_sha], destination)
     if checkout.returncode != 0:
         raise ProviderError(checkout.stderr.strip() or "fixture checkout failed")
-    return base_sha, head_sha
+    local_base = resolve_commit(destination, base_sha)
+    local_head = resolve_commit(destination, head_sha)
+    local_ancestry = run(["git", "merge-base", "--is-ancestor", local_base, local_head], destination)
+    if local_ancestry.returncode != 0:
+        raise ProviderError("fixture transfer did not preserve base-to-head ancestry")
+    return local_base, local_head
 
 
 def repo_root(options: dict[str, Any]) -> Path:
