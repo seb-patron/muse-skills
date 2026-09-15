@@ -30,8 +30,10 @@ corrected v3 rubrics to the already saved review text.
 The three disclosed development cases ask whether a review catches a structured
 type-boundary defect, catches an overstated evidence claim, and approves a repaired
 change that still contains one valid low-severity metadata issue. In the table,
-PASS means that one saved review satisfied all nine applicable contract and grading
-components. It does not mean the skill passed a general evaluation.
+PASS means that one saved review met the case contract, expected verdict, and
+applicable grading checks. Blocking recall is not applicable, and is not counted,
+when a case has no blocking issue in its gold. A row PASS does not mean the skill
+passed a general evaluation.
 
 | Development case | Current skill | Experimental instructions |
 | --- | --- | --- |
@@ -57,9 +59,13 @@ human-adjudicated, and “gold” does not mean infallible truth.
   was unscored, so the aggregate is the average of five scored rows: three finds
   and two misses.
 - **Blocking recall (`0.5`)** applies only to expected issues labeled blocking by
-  the gold. The gold label determines this subset even when the candidate uses a
-  different severity. One of the two scored blocking issues was found. Detection
-  credit does not establish agreement about severity.
+  the gold. “Blocking” is a severity category for a defect judged necessary to fix
+  before approval. Other levels, such as should-fix, can also make `NEEDS_FIXES`
+  the right verdict; blocking recall is a narrower measurement and does not decide
+  the verdict by itself. The gold label determines this subset even when the
+  candidate uses a different severity. The blocking-issue case had two scored
+  reviews, and one found the issue. Detection credit does not establish agreement
+  about severity.
 - **Supported precision (`1.0`)** asks whether the findings a review actually
   reported were supported. It is the average of five completed-row scores. A
   review that reports no findings can receive `1` because it made no unsupported
@@ -122,7 +128,9 @@ instruction more loudly is not supported by this result.
 - Frozen v3 cases SHA-256: `095023d053d9360417203d2b8bb69171fef9028a616d7a4cb991ed6461889dd8`
 - Private source archive manifest SHA-256: `2a7e1d0a5f6f6de31eb849b51573edd60c5405601283f8de08ef49bcd4660da3`
 
-The saved reviews, protected expected findings, raw grader responses, and private
-source archive are not public artifacts and are not linked from this repository.
-This sanitized report makes the calibration conclusion reviewable; it does not
-turn the disclosed development cases into a public benchmark.
+The linked case pack already publishes sanitized `gold_findings` annotations for
+the three disclosed cases. The complete saved candidate reviews, raw grader
+responses, and underlying private source archive remain private and are not linked
+from this repository. This sanitized report makes the calibration conclusion
+reviewable; it does not turn the disclosed development cases into a public
+benchmark.
