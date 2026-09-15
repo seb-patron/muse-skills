@@ -194,8 +194,12 @@ private, immutable v2 evidence.
 The executed v2 calibration later exposed an incorrect approval-control annotation
 and an ambiguous blocking-recall instruction. [`DEVELOPMENT_V3.md`](DEVELOPMENT_V3.md)
 defines the additive corrected profile while preserving v2 as historical evidence.
-Validate v3 offline with `npm run eval:development-v3:validate`; running
-`npm run eval:development-v3` requires separate live and private-source authorization.
+The [development v3 calibration replay](reports/2026-09-14-development-v3-calibration.md)
+applied the corrected rubrics to five saved v2 reviews and preserved one timeout. It
+made 15 Terra rubric evaluations and no new Muse calls; it is grader calibration,
+not a fresh v3 candidate run. Validate the profile offline with
+`npm run eval:development-v3:validate`; running `npm run eval:development-v3`
+requires separate live and private-source authorization.
 Do not mix v2 and v3 aggregate recall directly because the corrected low finding
 changes the approval-control recall denominator.
 

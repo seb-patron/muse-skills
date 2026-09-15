@@ -1,6 +1,7 @@
 # Development calibration v3
 
-Status: offline-ready; no v3 candidate execution or grading has run.
+Status: grader calibration completed over saved v2 candidate reviews; no fresh v3
+candidate execution has run.
 
 Protocol: `muse-adversarial-review-development-v3`
 
@@ -52,9 +53,18 @@ specific authorization for inference and private-source delivery.
 Offline tests prove the pinned configuration and deterministic normalizer wiring.
 Synthetic rows cover a blocking gold defect that was found under a different
 candidate severity and the same defect being missed. They do not validate how a
-future Terra call will apply the revised rubric. A live calibration run and review
-of grader reasons remain necessary before comparing v3 scores with the historical
-v2 run. Do not directly combine or compare v2 and v3 aggregate recall: v3 adds a
+future Terra call will apply the revised rubric.
+
+A later grader-only replay applied the frozen v3 rubrics to the five completed,
+saved v2 reviews and preserved the sixth row's original timeout. It made 15 Terra
+rubric evaluations and no new Muse candidate calls. All 12 applicable scores
+matched their predeclared expectations; see the
+[`2026-09-14 calibration report`](reports/2026-09-14-development-v3-calibration.md)
+for the row outcomes, plain-language metric definitions, and limits. This calibrates
+the revised grading rules against saved development evidence. It is not a fresh v3
+candidate run.
+
+Do not directly combine or compare v2 and v3 aggregate recall: v3 adds a
 low finding to the approval-control denominator, while v2 correctly excluded its
 then-`NONE` denominator under the frozen case contract. Neither version supports a
 winner, skill-promotion, held-out, or full issue #5 completion claim.
