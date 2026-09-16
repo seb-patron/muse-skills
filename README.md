@@ -9,6 +9,7 @@ rounds 2–3.
 |---|---|
 | [skills/adversarial-review](skills/adversarial-review/SKILL.md) | Pre-verdict adversarial probe pass over a green-gated diff: a runnable catalogue of probes (imports, worktrees, guard evasions, vendoring, builds, help text, docs-as-written) plus a refutation pass before APPROVE. |
 | [skills/fix-verification](skills/fix-verification/SKILL.md) | Post-fix closeout: one traceability row per finding, diff-to-row mapping, per-row repro re-runs on the final head (incl. after rebases), status-field consistency, and a `Revision rounds: N/3` counter. |
+| [skills/review-loop](skills/review-loop/SKILL.md) | Supervisor layer: attach plan refutation (Round 0) plus bounded implementer → reviewer → fixer rounds (`Revision rounds: N/5`, hard cap), role separation, artifact conventions, push discipline, dead-agent handling, and human-handoff stop conditions. |
 
 Background (evidence, not required reading): the miss analysis, skills review,
 and cross-review that produced these live in the originating work log, and each
