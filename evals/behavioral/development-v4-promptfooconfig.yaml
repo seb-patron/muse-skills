@@ -1,0 +1,105 @@
+description: Development experiment v4 adding the PR #87 exact-head repair chain
+
+prompts:
+  - file://prompts/review-v4.txt
+
+providers:
+  - id: file://providers/muse_provider.py
+    label: development-v4-current
+    config:
+      variant: current
+      candidate_id: current
+      candidate_sha256: dd4f217a140beb155f209f9215932fa44e84936096796ade725f49199c239380
+      model: muse-spark-1.3-contributor
+      reasoning_effort: high
+      timeout: 600000
+      max_model_steps: 24
+      max_tool_output_bytes: 200000
+      timeout_seconds: 540
+  - id: file://providers/muse_provider.py
+    label: development-v4-evidence-claims
+    config:
+      variant: candidate
+      candidate_id: evidence-claims-v2
+      candidate_sha256: feea0437ae4f5218a6795d11fd2f31404cc445308159f8946c38b897d87629f6
+      model: muse-spark-1.3-contributor
+      reasoning_effort: high
+      timeout: 600000
+      max_model_steps: 24
+      max_tool_output_bytes: 200000
+      timeout_seconds: 540
+
+defaultTest:
+  options:
+    disableVarExpansion: true
+    provider:
+      id: openai:codex-sdk:gpt-5.6-terra
+      config:
+        model_reasoning_effort: high
+        sandbox_mode: read-only
+        working_dir: ../..
+  assert:
+    - type: python
+      value: file://assertions/review_contract.py:assert_review_contract
+      metric: review_contract
+    - type: python
+      value: file://assertions/review_contract.py:assert_expected_verdict
+      metric: verdict_accuracy
+    - type: python
+      value: file://assertions/review_contract.py:assert_skill_observation
+      metric: skill_observation
+    - type: python
+      value: file://assertions/review_contract.py:assert_candidate_identity
+      metric: candidate_integrity
+    - type: python
+      value: file://assertions/review_contract.py:assert_no_self_grading
+      metric: independent_grading
+    - type: python
+      value: file://assertions/review_contract.py:assert_evidence
+      metric: evidence
+    - type: llm-rubric
+      metric: gold_recall
+      threshold: 0.75
+      value: |
+        Evaluate only whether the candidate review detects each required defect below
+        and describes its concrete impact. Treat semantically equivalent wording as a
+        match. The candidate's severity label does not decide whether the gold defect
+        applies or was detected; record severity agreement separately in the reason.
+        Score equals the fraction of required defects detected. A low gold finding may
+        coexist with an APPROVE verdict under this case contract.
+
+        Required findings:
+        {{gold_findings}}
+    - type: llm-rubric
+      metric: blocking_recall
+      threshold: 0.75
+      value: |
+        Evaluate detection of required findings marked blocking. The gold annotation,
+        not the candidate's severity label, defines this denominator. Count a blocking
+        gold defect as recalled when the review identifies that defect and its concrete
+        impact, even if the review assigns another severity; disclose that severity
+        mismatch in the reason. If there is no blocking gold, score 1 unless the review
+        invents a blocking issue. A timeout or missing final review is an execution
+        error, not zero recall.
+
+        Required findings:
+        {{gold_findings}}
+    - type: llm-rubric
+      metric: supported_precision
+      threshold: 0.75
+      value: |
+        Score actionable findings for a tight location, concrete impact, and direct
+        local reproduction. Penalize resurrection of a resolved finding and claims
+        that a green suite proves more than its executed cases. Score 1 when every
+        actionable finding is supported and no resolved issue is reported as live.
+
+        Resolved findings:
+        {{resolved_findings}}
+
+tests: file://cases/development-v4-cases.yaml
+
+evaluateOptions:
+  maxConcurrency: 1
+  timeoutMs: 900000
+
+sharing: false
