@@ -97,8 +97,9 @@ identities are preserved and are not silently recomputed.
 
 The Codex consultation is the non-author Sol analysis recorded in the task handoff;
 the native research agents were Luna/Luna and the analysis agent was Sol. The
-Claude packet and pending status are recorded under `consultation/`. No Claude
-response is claimed.
+Claude packet and response are recorded under `consultation/`. The response was
+written on 2026-09-15 from a wider evidence set than the packet; its evidence
+boundary is stated at the top of the file.
 
 The combined spike must receive substantive review from a non-author Sol agent.
 Mechanical fixtures or documentation may receive Luna review. The author addresses
