@@ -102,6 +102,7 @@ const developmentStages = {
     preflight: "validate-evidence-claims-v3-screen",
     // Disposable checkouts go outside this repository, away from answer keys.
     outsideWorkspaces: true,
+    grading: "deterministic",
   },
 };
 
@@ -259,11 +260,12 @@ function verifyExperimentOutput(stageName, settings, finalistLabels) {
     return false;
   }
   const metricsOutput = `${output}.metrics-v2.json`;
+  const gradingArgs = settings.grading ? ["--grading", settings.grading] : [];
   const summary = spawnSync(
     process.env.SPIKE_PYTHON ?? "python3",
     process.env.SPIKE_PYTHON
-      ? [spikeScoring, "--input", output, "--output", metricsOutput]
-      : [spikeScoring, "--input", output, "--output", metricsOutput],
+      ? [spikeScoring, "--input", output, "--output", metricsOutput, ...gradingArgs]
+      : [spikeScoring, "--input", output, "--output", metricsOutput, ...gradingArgs],
     { stdio: "inherit", env: process.env },
   );
   if (summary.error || summary.status !== 0) {
@@ -284,6 +286,11 @@ function verifyExperimentOutput(stageName, settings, finalistLabels) {
       `${metrics.aggregate?.errors ?? "unknown"} errors`,
     );
     return false;
+  }
+  if (metrics.aggregate?.quarantined) {
+    console.warn(
+      `${stageName}: ${metrics.aggregate.quarantined} row(s) QUARANTINED; inspect traces before using them`,
+    );
   }
   console.log(`${stageName}: verified ${rows.length} rows; normalized metrics at ${metricsOutput}`);
   return true;

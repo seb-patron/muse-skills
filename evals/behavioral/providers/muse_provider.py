@@ -366,20 +366,48 @@ def _retain_trace(
         return {"traceStatus": "not-retained"}
     directory = Path(trace_dir)
     if not directory.is_dir():
-        raise ProviderError(f"trace directory does not exist: {directory}")
+        return {"traceStatus": "failed", "traceError": "trace directory does not exist"}
     case_id = str((context.get("test") or {}).get("metadata", {}).get("case_id") or "case")
     stem = re.sub(r"[^A-Za-z0-9._-]", "_", f"{case_id}__{candidate_id or 'none'}__{time.time_ns()}")
     record: dict[str, Any] = {"traceStatus": "retained"}
     for suffix, text in (("stdout.jsonl", stdout), ("stderr.txt", stderr)):
         data = text.encode("utf-8", errors="replace")
-        path = directory / f"{stem}.{suffix}"
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
         key = "traceStdout" if suffix.startswith("stdout") else "traceStderr"
-        record[f"{key}File"] = path.name
+        # Hashes are recorded even if the write fails, so a finished review is
+        # never discarded because its private copy could not be kept.
         record[f"{key}Sha256"] = hashlib.sha256(data).hexdigest()
+        try:
+            path = directory / f"{stem}.{suffix}"
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+            record[f"{key}File"] = path.name
+        except OSError as exc:
+            record["traceStatus"] = "failed"
+            record["traceError"] = f"{type(exc).__name__}: {exc.strerror or exc}"
     return record
+
+
+SCRUBBED_ENV_PREFIXES = ("MUSE_EVAL_", "SPIKE_", "PROMPTFOO_", "npm_", "VIRTUAL_ENV")
+SCRUBBED_ENV_NAMES = {"INIT_CWD", "PWD", "OLDPWD"}
+
+
+def _review_env(repo_root: Path) -> dict[str, str]:
+    """Environment for Muse without paths or names that point at the eval harness."""
+
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in SCRUBBED_ENV_NAMES and not name.startswith(SCRUBBED_ENV_PREFIXES)
+    }
+    if "PATH" in env:
+        root = str(repo_root)
+        env["PATH"] = os.pathsep.join(
+            entry for entry in env["PATH"].split(os.pathsep)
+            if entry and entry != root and not entry.startswith(f"{root}/")
+        )
+    env.update({"MUSE_NO_AUTO_UPDATE": "1", "NO_COLOR": "1"})
+    return env
 
 
 def _text(value: Any) -> str:
@@ -406,6 +434,8 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
             raise ProviderError(f"repository root is not a Git checkout: {repo_root}")
         if shutil.which(muse_binary) is None and not Path(muse_binary).is_file():
             raise ProviderError(f"Muse executable not found: {muse_binary}")
+        # Resolve now: the review environment drops eval-repository PATH entries.
+        muse_binary = shutil.which(muse_binary) or muse_binary
 
         # Muse's session lease is workspace-root scoped and has rejected disposable
         # clones in some locations, so by default the clone sits under the eval
@@ -486,8 +516,7 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 prompt = _activate_skill_prompt(prompt, skill_name)
             args.append(prompt)
 
-            env = os.environ.copy()
-            env.update({"MUSE_NO_AUTO_UPDATE": "1", "NO_COLOR": "1"})
+            env = _review_env(repo_root)
             started = time.monotonic()
             timed_out = False
             try:

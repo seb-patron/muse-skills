@@ -243,6 +243,47 @@ class BehavioralProviderTests(unittest.TestCase):
         self.assertEqual(response["metadata"]["graderBoundaryFlags"], ["gold_findings"])
         self.assertEqual(response["metadata"]["traceStatus"], "retained")
 
+    def test_trace_write_failure_keeps_the_finished_review(self):
+        def read_only_traces(w):
+            self.trace_dir.chmod(0o500)
+            self.addCleanup(self.trace_dir.chmod, 0o700)
+            return []
+
+        response, _ = self._call_screen_provider(read_only_traces, workspace_parent=True)
+        self.assertNotIn("error", response)
+        self.assertEqual(response["metadata"]["traceStatus"], "failed")
+        self.assertIn("PermissionError", response["metadata"]["traceError"])
+        self.assertRegex(response["metadata"]["traceStdoutSha256"], r"^[0-9a-f]{64}$")
+        self.assertIn("verdict", response["output"])
+
+    def test_review_env_hides_eval_harness_paths_and_names(self):
+        root = self.repo.resolve()
+        fake = {
+            "PATH": os.pathsep.join([f"{root}/node_modules/.bin", "/usr/bin", str(root)]),
+            "MUSE_EVAL_TRACE_DIR": f"{root}/evals/behavioral/results/x.traces",
+            "MUSE_EVAL_WORKSPACE_PARENT": "/outside",
+            "npm_lifecycle_event": "eval:evidence-claims-v3-screen",
+            "INIT_CWD": str(root), "PWD": str(root), "SPIKE_PYTHON": f"{root}/.venv/bin/python",
+            "PROMPTFOO_CONFIG_DIR": f"{root}/evals/behavioral/results/x.promptfoo",
+            "VIRTUAL_ENV": f"{root}/.venv", "HOME": "/home/user",
+        }
+        with mock.patch.dict(os.environ, fake, clear=True):
+            env = muse_provider._review_env(root)
+        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertEqual(env["HOME"], "/home/user")
+        flat = "\n".join(f"{k}={v}" for k, v in env.items())
+        self.assertNotIn(str(root), flat)
+        for marker in muse_provider.GRADER_ONLY_MARKERS:
+            self.assertNotIn(marker, flat)
+
+    def test_workspace_parent_from_runner_environment(self):
+        outside = Path(self.temp.name) / "from-env"
+        outside.mkdir()
+        with mock.patch.dict(os.environ, {"MUSE_EVAL_WORKSPACE_PARENT": str(outside)}):
+            self.assertEqual(muse_provider._workspace_parent({}, self.repo.resolve()), outside.resolve())
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(muse_provider._workspace_parent({}, self.repo.resolve()), self.repo.resolve())
+
     def test_workspace_parent_must_be_outside_eval_repo(self):
         inside = self.repo / "nested"
         inside.mkdir()
@@ -791,6 +832,51 @@ class SpikeValidationTests(unittest.TestCase):
         self.assertIsNone(scored["all_gold_recall"])
         self.assertIsNone(scored["verdict_accuracy"])
 
+    def test_review_only_normalization_completes_and_quarantines(self):
+        base_scores = {name: 1 for name in scoring.DETERMINISTIC_NAMED_SCORES}
+
+        def row(case_id, label, verdict, expected, flags=(), boundary=1):
+            return {
+                "provider": {"label": label},
+                "metadata": {"case_id": case_id, "split": "development"},
+                "vars": {"expected_verdict": expected, "gold_findings": "1. x (should-fix): y"},
+                "namedScores": {**base_scores, "answer_key_boundary": boundary},
+                "response": {
+                    "output": json.dumps({"verdict": verdict}),
+                    "metadata": {"candidateId": label, "graderBoundaryFlags": list(flags)},
+                },
+            }
+
+        rows = [
+            row("a", "v2", "NEEDS_FIXES", "NEEDS_FIXES"),
+            row("b", "v2", "APPROVE", "NEEDS_FIXES"),
+            row("c", "v2", "APPROVE", "APPROVE"),
+            row("a", "v3", "NEEDS_FIXES", "NEEDS_FIXES"),
+            row("b", "v3", "APPROVE", "NEEDS_FIXES", flags=["gold_findings"], boundary=0),
+            row("c", "v3", "APPROVE", "APPROVE"),
+        ]
+        payload = {"results": {"results": rows}}
+        rubric = scoring.normalize(payload)
+        self.assertEqual(rubric["aggregate"]["completed"], 0)
+        result = scoring.normalize(payload, "deterministic")
+        aggregate = result["aggregate"]
+        self.assertEqual((aggregate["rows"], aggregate["completed"], aggregate["errors"]), (6, 6, 0))
+        self.assertEqual(aggregate["quarantined"], 1)
+        # The quarantined false approval is counted but kept out of quality totals.
+        self.assertEqual(aggregate["false_approvals"], 1)
+        self.assertAlmostEqual(aggregate["verdict_accuracy"], 4 / 5)
+        self.assertIsNone(aggregate["all_gold_recall"])
+        self.assertTrue(result["rows"][4]["quarantined"])
+        self.assertEqual(result["rows"][4]["grader_boundary_flags"], ["gold_findings"])
+        self.assertEqual(result["normalization"]["grading"], "deterministic")
+        # An error row whose trace hit a marker is still reported as quarantined.
+        errored = row("a", "v3", "", "NEEDS_FIXES", flags=["gold_findings"])
+        errored["response"] = {"error": "Muse timed out", "output": "",
+                               "metadata": {"graderBoundaryFlags": ["gold_findings"]}}
+        scored = scoring.normalize({"results": {"results": [errored]}}, "deterministic")
+        self.assertEqual(scored["aggregate"]["errors"], 1)
+        self.assertEqual(scored["aggregate"]["quarantined"], 1)
+
     def test_empty_gold_recall_is_not_applicable_but_verdict_still_scores(self):
         scored = scoring.score_row(
             {
@@ -1308,6 +1394,61 @@ class SpikeValidationTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(Path(parent).stat().st_mode), 0o700)
                 self.assertIn("--no-cache --repeat 1", args)
                 self.assertIn("evidence-claims-v3-screen-promptfooconfig.yaml", args)
+            finally:
+                for artifact in artifacts:
+                    if artifact.is_dir():
+                        shutil.rmtree(artifact, ignore_errors=True)
+                    else:
+                        artifact.unlink(missing_ok=True)
+
+
+    def test_screen_runner_accepts_a_complete_review_only_run(self):
+        output = experiment.ROOT / "evals/behavioral/results/evidence-claims-v3-screen.json"
+        artifacts = [output, *(Path(f"{output}{suffix}") for suffix in (
+            ".metrics-v2.json", ".reservation.json", ".promptfoo", ".traces"))]
+        for artifact in artifacts:
+            self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
+        rows = []
+        for label in ("screen-evidence-claims-v2", "screen-evidence-claims-v3"):
+            for case in experiment._load(experiment.DEVELOPMENT_V3_CASES):
+                verdict = case["vars"]["expected_verdict"]
+                rows.append({
+                    "provider": {"label": label},
+                    "metadata": dict(case["metadata"]),
+                    "vars": dict(case["vars"]),
+                    "namedScores": {name: 1 for name in scoring.DETERMINISTIC_NAMED_SCORES},
+                    "response": {"output": json.dumps({"verdict": verdict}),
+                                 "metadata": {"graderBoundaryFlags": []}},
+                })
+        with tempfile.TemporaryDirectory() as temp:
+            canned = Path(temp) / "canned.json"
+            canned.write_text(json.dumps({"results": {"results": rows}}), encoding="utf-8")
+            fake_bin = Path(temp) / "bin"
+            fake_bin.mkdir()
+            promptfoo = fake_bin / "promptfoo"
+            promptfoo.write_text(
+                '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\n'
+                'cp "$FAKE_CANNED" "$out"\nexit 100\n',
+                encoding="utf-8",
+            )
+            promptfoo.chmod(0o700)
+            try:
+                result = subprocess.run(
+                    ["node", "evals/behavioral/run.mjs", "evidence-claims-v3-screen"],
+                    cwd=experiment.ROOT, capture_output=True, text=True, check=False,
+                    env={
+                        **os.environ,
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                        "SPIKE_PYTHON": sys.executable,
+                        "FAKE_CANNED": str(canned),
+                        "MUSE_EVAL_WORKSPACE_BASE": str(Path(temp) / "outside"),
+                    },
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("verified 6 rows", result.stdout)
+                metrics = json.loads(Path(f"{output}.metrics-v2.json").read_text(encoding="utf-8"))
+                self.assertEqual(metrics["aggregate"]["completed"], 6)
+                self.assertEqual(metrics["aggregate"]["verdict_accuracy"], 1)
             finally:
                 for artifact in artifacts:
                     if artifact.is_dir():

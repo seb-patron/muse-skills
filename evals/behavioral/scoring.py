@@ -31,6 +31,11 @@ REQUIRED_NAMED_SCORES = {
     "blocking_recall",
     "supported_precision",
 }
+# Review-only stages record no LLM rubric scores; they quarantine instead.
+DETERMINISTIC_NAMED_SCORES = (
+    REQUIRED_NAMED_SCORES - {"gold_recall", "blocking_recall", "supported_precision"}
+) | {"answer_key_boundary"}
+GRADING_MODES = {"rubric": REQUIRED_NAMED_SCORES, "deterministic": DETERMINISTIC_NAMED_SCORES}
 NORMALIZATION_ID = "muse-review-metrics-v2"
 
 
@@ -103,7 +108,10 @@ def _case_recall_applicability(raw: Mapping[str, Any]) -> tuple[bool | None, boo
 
 
 def _execution_error(
-    raw: Mapping[str, Any], response: Mapping[str, Any], output: str
+    raw: Mapping[str, Any],
+    response: Mapping[str, Any],
+    output: str,
+    required: set[str] = REQUIRED_NAMED_SCORES,
 ) -> str | None:
     provider_error = response.get("error")
     if provider_error:
@@ -113,13 +121,13 @@ def _execution_error(
         return row_error or "candidate returned no final output"
     if _named_score(raw, "review_contract") != 1:
         return row_error or "candidate output failed the review contract"
-    missing = sorted(name for name in REQUIRED_NAMED_SCORES if _named_score(raw, name) is None)
+    missing = sorted(name for name in required if _named_score(raw, name) is None)
     if missing:
         return row_error or f"row is missing required scores: {', '.join(missing)}"
     return None
 
 
-def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+def promptfoo_rows(payload: Mapping[str, Any], grading: str = "rubric") -> list[dict[str, Any]]:
     """Convert raw Promptfoo rows into the facts consumed by ``score_row``.
 
     Promptfoo keeps the independent rubric scores in ``namedScores`` and the
@@ -128,6 +136,7 @@ def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     treats a missing/error row as a zero-quality review.
     """
 
+    required = GRADING_MODES[grading]
     inner = payload.get("results") if isinstance(payload.get("results"), Mapping) else payload
     raw_rows = inner.get("results") if isinstance(inner, Mapping) else None
     if not isinstance(raw_rows, list):
@@ -144,8 +153,10 @@ def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         facts = facts if isinstance(facts, Mapping) else {}
         all_gold_applicable, blocking_gold_applicable = _case_recall_applicability(raw)
         output = _response_output(raw)
-        execution_error = _execution_error(raw, response, output)
+        execution_error = _execution_error(raw, response, output, required)
         completed = execution_error is None
+        flags = provider_metadata.get("graderBoundaryFlags")
+        quarantined = bool(flags) or _named_score(raw, "answer_key_boundary") == 0
         converted.append(
             {
                 "case_id": case_metadata.get("case_id"),
@@ -171,6 +182,8 @@ def promptfoo_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "actionable_findings": facts.get("actionable_findings"),
                 "supported_findings": facts.get("supported_findings"),
                 "completion": completed,
+                "quarantined": quarantined,
+                "grader_boundary_flags": flags if isinstance(flags, list) else None,
                 "error": execution_error,
                 "assertion_error": raw.get("error"),
                 "latency_ms": raw.get("latencyMs"),
@@ -225,6 +238,8 @@ def score_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "base_sha": row.get("base_sha"),
         "head_sha": row.get("head_sha"),
         "completion": completed,
+        "quarantined": bool(row.get("quarantined")),
+        "grader_boundary_flags": row.get("grader_boundary_flags"),
         "blocking_finding_recall": (
             direct_blocking if completed and blocking_applicable is True and direct_blocking is not None
             else len(matched_blocking) / len(blocking) if completed and blocking_applicable is True and blocking
@@ -254,6 +269,13 @@ def aggregate(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         values = [item[name] for item in scored if isinstance(item.get(name), (int, float))]
         return sum(values) / len(values) if values else None
 
+    # Quarantined rows stay counted but never feed quality aggregates.
+    usable = [item for item in scored if not item["quarantined"]]
+
+    def usable_mean(name: str) -> float | None:
+        values = [item[name] for item in usable if isinstance(item.get(name), (int, float))]
+        return sum(values) / len(values) if values else None
+
     token_values = [item["candidate_tokens"] for item in scored if isinstance(item.get("candidate_tokens"), int)]
     cost_values = [item["candidate_cost"] for item in scored if isinstance(item.get("candidate_cost"), (int, float))]
     complete_rows = [item for item in scored if item["completion"]]
@@ -261,7 +283,8 @@ def aggregate(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
         "rows": len(scored),
         "completed": sum(bool(item["completion"]) for item in scored),
         "errors": sum(not item["completion"] for item in scored),
-        "false_approvals": sum(bool(item["false_approval"]) for item in scored),
+        "quarantined": sum(item["quarantined"] for item in scored),
+        "false_approvals": sum(bool(item["false_approval"]) for item in usable),
         "blocking_finding_recall": mean("blocking_finding_recall"),
         "blocking_recall_applicable_rows": sum(
             item["blocking_recall_applicable"] is True for item in scored
@@ -277,7 +300,7 @@ def aggregate(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
             isinstance(item.get("all_gold_recall"), (int, float)) for item in scored
         ),
         "supported_precision": mean("supported_precision"),
-        "verdict_accuracy": mean("verdict_accuracy"),
+        "verdict_accuracy": usable_mean("verdict_accuracy"),
         "latency_ms": mean("latency_ms"),
         "candidate_tokens": sum(token_values) if complete_rows and len(token_values) == len(complete_rows) else None,
         "candidate_cost": sum(cost_values) if complete_rows and len(cost_values) == len(complete_rows) else None,
@@ -288,11 +311,12 @@ def aggregate(rows: list[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def normalize(payload: Mapping[str, Any]) -> dict[str, Any]:
-    rows = promptfoo_rows(payload)
+def normalize(payload: Mapping[str, Any], grading: str = "rubric") -> dict[str, Any]:
+    rows = promptfoo_rows(payload, grading)
     return {
         "normalization": {
             "id": NORMALIZATION_ID,
+            "grading": grading,
             "recall_semantics": "not-applicable and unknown denominators are excluded",
         },
         "rows": [score_row(row) for row in rows],
@@ -304,9 +328,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Normalize raw Promptfoo spike results")
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--grading", choices=sorted(GRADING_MODES), default="rubric")
     args = parser.parse_args()
     payload = json.loads(args.input.read_text(encoding="utf-8"))
-    result = normalize(payload)
+    result = normalize(payload, args.grading)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"normalized {len(result['rows'])} Promptfoo rows with {NORMALIZATION_ID}")
