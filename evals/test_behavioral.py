@@ -292,6 +292,17 @@ class BehavioralProviderTests(unittest.TestCase):
         for command, flag in escapes.items():
             with self.subTest(command=command):
                 self.assertIn(flag, muse_provider._command_flags(command, workspace))
+        for tool in ("/opt/homebrew/bin/rg -n x src", "/usr/local/bin/jq . a.json"):
+            self.assertEqual(muse_provider._command_flags(tool, workspace), set())
+        # Truncated, prefixed or fenced JSON still yields its commands.
+        for text in (
+            '{\n  "chunk_id": "exec-1-1",\n  "command": "cat ../x",\n  "output": "trunc',
+            'Exit 0\n{"command": "cat ../x"}',
+            '```json\n{"checks": [{"command": "cat ../x"}]}\n```',
+        ):
+            with self.subTest(text=text[:20]):
+                stream = json.dumps({"payload_type": "tool.result", "payload": {"text": text}})
+                self.assertIn("cat ../x", muse_provider._command_texts(stream))
         # Commands the review itself reports are scanned too.
         review = json.dumps({"checks": [{"command": "cat ../../x", "exit_code": 0}]})
         stream = json.dumps({"payload_type": "run.terminal.completed", "payload": {"text": review}})
@@ -940,6 +951,11 @@ class SpikeValidationTests(unittest.TestCase):
         scored = scoring.normalize({"results": {"results": [untraced]}}, "deterministic")
         self.assertEqual(scored["aggregate"]["quarantined"], 1)
         self.assertIsNone(scored["aggregate"]["verdict_accuracy"])
+        # Older rubric stages never promised traces, so their metrics are unchanged.
+        untraced["response"]["metadata"]["traceStatus"] = "not-retained"
+        untraced["namedScores"].pop("answer_key_boundary")
+        rubric_scored = scoring.promptfoo_rows({"results": {"results": [untraced]}})
+        self.assertFalse(rubric_scored[0]["quarantined"])
 
     def test_empty_gold_recall_is_not_applicable_but_verdict_still_scores(self):
         scored = scoring.score_row(

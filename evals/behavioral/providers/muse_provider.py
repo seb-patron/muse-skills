@@ -328,12 +328,14 @@ def _parse_muse_stream(stdout: str, skill_name: str) -> dict[str, Any]:
 # else outside the checkout is flagged for audit; this is a heuristic, not a
 # shell parser, and a clean scan only means no exposure was observed.
 ALLOWED_COMMAND_PATHS = re.compile(
-    r"^(?:/dev/(?:null|stdin|stdout|stderr)|/(?:usr/)?bin/[A-Za-z0-9._+-]+)$"
+    r"^(?:/dev/(?:null|stdin|stdout|stderr)"
+    r"|/(?:usr/|usr/local/|opt/homebrew/)?bin/[A-Za-z0-9._+-]+)$"
 )
 _ABSOLUTE_PATH = re.compile(r"(?:^|(?<=[\s'\"=(:,;|&<>]))(/(?!/)[^\s'\"`;|&<>()]*)")
 _TRAVERSAL = re.compile(r"(?:^|(?<=[\s'\"=/:(]))\.\.(?=/|$|[\s'\"):;])")
 _HOME = re.compile(r"\$\{?HOME\b|(?:^|(?<=[\s'\"=:(]))~(?=/|$|[\s'\"):;])")
 _CHANGE_DIR = re.compile(r"(?:^|(?<=[\s;&|(]))(?:cd|pushd)(?:\s+([^\s;&|)]+))?(?=$|[\s;&|)])")
+_COMMAND_FIELD = re.compile(r'"command"\s*:\s*"((?:[^"\\]|\\.)*)')
 _INDIRECT = re.compile(
     r"git\s+-C\b|--git-dir|--work-tree|GIT_DIR|GIT_WORK_TREE|GIT_ALTERNATE_OBJECT_DIRECTORIES"
     r"|objects/info/alternates|expanduser|Path\.home|os\.environ|getenv"
@@ -345,6 +347,14 @@ def _command_texts(stdout: str) -> list[str]:
 
     commands: list[str] = []
 
+    def salvage(text: str) -> None:
+        # Truncated, prefixed or fenced JSON still exposes its "command" strings.
+        for match in _COMMAND_FIELD.finditer(text):
+            try:
+                commands.append(json.loads(f'"{match.group(1)}"'))
+            except json.JSONDecodeError:
+                commands.append(match.group(1))
+
     def visit(value: Any) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
@@ -355,11 +365,13 @@ def _command_texts(stdout: str) -> list[str]:
         elif isinstance(value, list):
             for item in value:
                 visit(item)
-        elif isinstance(value, str) and value.lstrip().startswith("{") and '"command"' in value:
+        elif isinstance(value, str) and '"command"' in value:
             try:
-                visit(json.loads(value))
+                parsed = json.loads(value)
             except json.JSONDecodeError:
-                pass
+                salvage(value)
+            else:
+                visit(parsed)
 
     for line in stdout.splitlines():
         line = line.strip()
@@ -367,7 +379,7 @@ def _command_texts(stdout: str) -> list[str]:
             try:
                 visit(json.loads(line))
             except json.JSONDecodeError:
-                continue
+                salvage(line)
     return commands
 
 

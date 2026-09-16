@@ -157,7 +157,10 @@ def promptfoo_rows(payload: Mapping[str, Any], grading: str = "rubric") -> list[
         completed = execution_error is None
         flags = provider_metadata.get("graderBoundaryFlags")
         # A row without its complete retained trace cannot be audited.
-        unevaluable_trace = provider_metadata.get("traceStatus") in {"failed", "not-retained"}
+        # Only review-only stages promise retained traces; older stages keep their metrics.
+        unevaluable_trace = grading == "deterministic" and provider_metadata.get(
+            "traceStatus"
+        ) in {"failed", "not-retained"}
         quarantined = (
             bool(flags) or unevaluable_trace or _named_score(raw, "answer_key_boundary") == 0
         )
