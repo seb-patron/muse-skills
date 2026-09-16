@@ -1,7 +1,7 @@
 # evidence-claims-v3 screen
 
-Status: wired and checked offline. No Muse call has been made for this screen.
-A live run needs owner authorization recorded on issue #18.
+Status: executed on 2026-09-16 under owner authorization. v3 did not pass; see
+the [screen report](reports/2026-09-16-evidence-claims-v3-screen.md).
 
 Tracking issue: [#18](https://github.com/seb-patron/muse-skills/issues/18)
 
