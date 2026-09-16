@@ -1,0 +1,49 @@
+# Frozen expectations for the issue #18 screen. Grader/owner-only: never
+# delivered to Muse, and the screen's checkouts are created outside this repo.
+# Supersedes nothing: development-v3-cases.yaml stays the historical case pack.
+version: evidence-claims-v3-screen-answer-keys-v1
+frozen: 2026-09-16
+tracking_issue: https://github.com/seb-patron/muse-skills/issues/18
+provenance:
+  evidence: agent-executed reproductions and derivations (Claude), kept privately
+  second_opinion: independent model review of the proposed keys, 2026-09-16
+  owner_selected: [D1a case-1 severity, D5 isolation, D7 grading mode]
+  adopted_without_owner_objection: [D1b, D2, D3a, D3b, D4, D6, D8]
+cases:
+  genv-pr87-first-repair-type-boundary:
+    expected_verdict: NEEDS_FIXES
+    findings:
+      - id: nested-numeric-type-alias
+        severity: should-fix
+        changed_from: blocking in development-v3-cases.yaml (no written rule made it blocking)
+        detect_when: >-
+          The review identifies that the nested execution block is accepted by
+          value equality without exact scalar types and that the caller's values
+          are emitted into the durable fixture. An equal-valued float or bool/int
+          alias in that block is an equivalent demonstration of this one finding;
+          merely noting that Python equates such values is not enough.
+    resolved_not_live: [path-loader/privacy, framebuffer-precondition, unmatched-contrast]
+  genv-pr90-evidence-claim:
+    expected_verdict: NEEDS_FIXES
+    findings:
+      - id: overstated-control-animation
+        severity: should-fix
+        detect_when: >-
+          The review shows the note's "every adjacent checkpoint pair" control
+          claim is contradicted by the committed fixture (11 of 13 changing
+          intervals; [2299,2300] and [2303,2304] stable).
+    resolved_not_live: []
+  genv-pr90-synchronized-clean:
+    expected_verdict: APPROVE
+    scope: no known blocker in the changed artifacts and focused gates; not proof of a defect-free change
+    findings:
+      - id: review-history-metadata-mismatch
+        severity: low
+        optional_for_correct_verdict: true
+    resolved_not_live: [overstated-control-animation]
+    novel_blocking_or_should_fix: owner adjudication against the full base-to-head change; keep raw and adjudicated records
+interpretation_limits:
+  - Development cases disclosed before candidate freeze; one attempt per row is directional only.
+  - "Case 2 premise: a fixture field lists the 11 changing intervals, but not the 13-interval domain or the stable pairs. A v3 catch does not by itself show the ranking rule worked; a v3 miss implicates the denominator only if the trace shows that reasoning."
+  - Excluded, quarantined, or failed rows stay in the six-attempt accounting; a missing v2/v3 pair makes that case inconclusive.
+  - No case has blocking gold under these keys.

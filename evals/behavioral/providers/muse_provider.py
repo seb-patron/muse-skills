@@ -52,6 +52,7 @@ GRADER_ONLY_MARKERS = (
     "development-v3-cases",
     "miss-diagnosis",
     "development-v3-calibration",
+    "evidence-claims-v3-screen",
 )
 WORKSPACE_PREFIX = ".muse-skill-eval-"
 REMOTE_CASE_SOURCES = {
@@ -323,21 +324,68 @@ def _parse_muse_stream(stdout: str, skill_name: str) -> dict[str, Any]:
     }
 
 
-def _grader_boundary_breaches(stdout: str, repo_root: Path) -> list[str]:
-    """Name grader-only markers or eval-repository paths outside the checkout in a trace."""
+def _grader_boundary_breaches(stdout: str, repo_root: Path, workspace: Path) -> list[str]:
+    """Name grader-only markers, or eval-repository/sibling paths, seen in a trace."""
 
     breaches = {marker for marker in GRADER_ONLY_MARKERS if marker in stdout}
-    root = str(repo_root)
-    start = stdout.find(root)
-    while start != -1:
-        rest = stdout[start + len(root):]
-        # A bare root mention (e.g. a session-root event) opens nothing; a child
-        # path other than the disposable checkout does.
-        if rest.startswith("/") and not rest.startswith(f"/{WORKSPACE_PREFIX}"):
-            breaches.add("eval-repository-path")
-            break
-        start = stdout.find(root, start + len(root))
+    # The checkout's own paths are expected; any other child of the eval
+    # repository or of the checkout's parent directory is not.
+    remainder = stdout.replace(str(workspace), "")
+    if f"{repo_root}/" in remainder:
+        breaches.add("eval-repository-path")
+    parent = workspace.parent.parent
+    if parent != repo_root and f"{parent}/" in remainder:
+        breaches.add("workspace-parent-path")
     return sorted(breaches)
+
+
+def _workspace_parent(config: dict[str, Any], repo_root: Path) -> Path:
+    """Return where disposable checkouts go; outside the eval repo when configured."""
+
+    configured = config.get("workspace_parent") or os.environ.get("MUSE_EVAL_WORKSPACE_PARENT")
+    if not configured:
+        return repo_root
+    parent = Path(str(configured)).expanduser().resolve()
+    if not parent.is_dir():
+        raise ProviderError(f"workspace parent does not exist: {parent}")
+    if parent == repo_root or repo_root in parent.parents or parent in repo_root.parents:
+        raise ProviderError("workspace parent must not contain or sit inside the eval repository")
+    return parent
+
+
+def _retain_trace(
+    trace_dir: str | None,
+    context: dict[str, Any],
+    candidate_id: str | None,
+    stdout: str,
+    stderr: str,
+) -> dict[str, Any]:
+    """Keep one attempt's raw output privately; return its private locator and hashes."""
+
+    if not trace_dir:
+        return {"traceStatus": "not-retained"}
+    directory = Path(trace_dir)
+    if not directory.is_dir():
+        raise ProviderError(f"trace directory does not exist: {directory}")
+    case_id = str((context.get("test") or {}).get("metadata", {}).get("case_id") or "case")
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", f"{case_id}__{candidate_id or 'none'}__{time.time_ns()}")
+    record: dict[str, Any] = {"traceStatus": "retained"}
+    for suffix, text in (("stdout.jsonl", stdout), ("stderr.txt", stderr)):
+        data = text.encode("utf-8", errors="replace")
+        path = directory / f"{stem}.{suffix}"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        key = "traceStdout" if suffix.startswith("stdout") else "traceStderr"
+        record[f"{key}File"] = path.name
+        record[f"{key}Sha256"] = hashlib.sha256(data).hexdigest()
+    return record
+
+
+def _text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
 
 
 def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -350,6 +398,7 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
     skill_name = str(variables.get("skill_name", ""))
     muse_binary = str(config.get("muse_binary") or os.environ.get("MUSE_EVAL_BINARY") or "muse")
     timeout_seconds = int(config.get("timeout_seconds", 1200))
+    trace_dir = os.environ.get("MUSE_EVAL_TRACE_DIR")
 
     try:
         repo_root = _repo_root(options)
@@ -358,11 +407,12 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
         if shutil.which(muse_binary) is None and not Path(muse_binary).is_file():
             raise ProviderError(f"Muse executable not found: {muse_binary}")
 
-        # Muse's session lease is workspace-root scoped and rejects disposable
-        # clones created outside the configured project root. Keep the clone
-        # disposable, but place it under that permitted root so the same provider
-        # works in headless desktop runs and in the historical fixture tests.
-        with tempfile.TemporaryDirectory(prefix=WORKSPACE_PREFIX, dir=repo_root) as temp:
+        # Muse's session lease is workspace-root scoped and has rejected disposable
+        # clones in some locations, so by default the clone sits under the eval
+        # repository. A configured workspace parent keeps it away from grader-only
+        # files instead.
+        parent = _workspace_parent(config, repo_root)
+        with tempfile.TemporaryDirectory(prefix=WORKSPACE_PREFIX, dir=parent) as temp:
             workspace = Path(temp) / "repo"
             identity = _candidate_identity(
                 repo_root,
@@ -439,69 +489,76 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
             env = os.environ.copy()
             env.update({"MUSE_NO_AUTO_UPDATE": "1", "NO_COLOR": "1"})
             started = time.monotonic()
+            timed_out = False
             try:
                 result = _run_muse(args, workspace, timeout_seconds, env)
+                stdout, stderr = result.stdout, result.stderr
             except subprocess.TimeoutExpired as exc:
-                return {"error": f"Muse timed out after {timeout_seconds}s: {exc}"}
+                timed_out = True
+                result = None
+                stdout, stderr = _text(exc.output), _text(exc.stderr)
             latency_ms = round((time.monotonic() - started) * 1000)
-            parsed = _parse_muse_stream(result.stdout, skill_name)
+            parsed = _parse_muse_stream(stdout, skill_name)
             external_source = variables.get("source_repository") in REMOTE_CASE_SOURCES
-            breaches = (
-                _grader_boundary_breaches(result.stdout, repo_root)
-                if spike_run and external_source
-                else []
-            )
-            if breaches:
-                return {
-                    "error": (
-                        "Muse trace reached grader-only or eval-repository material outside "
-                        f"its historical checkout: {', '.join(breaches)}"
-                    )
-                }
+            checked = spike_run and external_source
+            metadata = {
+                "runtime": "muse",
+                "variant": variant,
+                "skillName": skill_name if variant != "none" else None,
+                "candidateId": identity["candidateId"],
+                "candidatePath": identity["candidatePath"],
+                "candidateSha256": identity["candidateSha256"],
+                "candidateDelivery": identity["candidateDelivery"],
+                "skillDelivery": "project-skill" if variant != "none" else "withheld",
+                "skillActivation": "explicit-read_skill" if variant != "none" else "withheld",
+                "skillObserved": parsed["skillObserved"],
+                "baseSha": base_sha,
+                "headSha": head_sha,
+                "sourceRepository": variables.get("source_repository", "muse-skills"),
+                "museModels": parsed["models"],
+                "museExpectedModel": configured_model or None,
+                "museTokenUsage": parsed["usage"] or None,
+                "candidateTokenStatus": "observed" if parsed["usage"] else "unavailable",
+                "eventCount": parsed["eventCount"],
+                "museExitCode": None if timed_out else result.returncode,
+                "termination": "timeout" if timed_out else "exited",
+                "durationMs": latency_ms,
+                "workspaceOutsideEvalRepo": parent != repo_root,
+                # A flagged row is quarantined for inspection, never silently scored.
+                "graderBoundaryChecked": checked,
+                "graderBoundaryFlags": (
+                    _grader_boundary_breaches(stdout, repo_root, workspace) if checked else []
+                ),
+                "controlMode": "project-placeholder" if variant == "none" else None,
+                "stderrTail": stderr[-1000:],
+                **_retain_trace(trace_dir, context, candidate_id, stdout, stderr),
+            }
+
+            def failed(message: str) -> dict[str, Any]:
+                return {"error": message, "latencyMs": latency_ms, "metadata": metadata}
+
+            if timed_out:
+                return failed(f"Muse timed out after {timeout_seconds}s")
             if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout[-2000:]
-                return {"error": f"Muse exited {result.returncode}: {detail}"}
+                detail = stderr.strip() or stdout[-2000:]
+                return failed(f"Muse exited {result.returncode}: {detail}")
             if not parsed["output"].strip():
-                return {"error": "Muse completed without a terminal review output"}
+                return failed("Muse completed without a terminal review output")
             if spike_run and variant in {"current", "candidate"} and not parsed["skillObserved"]:
-                return {"error": "Muse completed without observing the delivered project skill"}
+                return failed("Muse completed without observing the delivered project skill")
             if spike_run and not parsed["models"]:
-                return {"error": "Muse completed without observed model telemetry"}
+                return failed("Muse completed without observed model telemetry")
             if spike_run and parsed["models"] != [configured_model]:
-                return {
-                    "error": (
-                        f"Muse model telemetry mismatch: expected {configured_model}, "
-                        f"observed {parsed['models']}"
-                    )
-                }
+                return failed(
+                    f"Muse model telemetry mismatch: expected {configured_model}, "
+                    f"observed {parsed['models']}"
+                )
 
             response = {
                 "output": parsed["output"],
                 "latencyMs": latency_ms,
                 "cached": False,
-                "metadata": {
-                    "runtime": "muse",
-                    "variant": variant,
-                    "skillName": skill_name if variant != "none" else None,
-                    "candidateId": identity["candidateId"],
-                    "candidatePath": identity["candidatePath"],
-                    "candidateSha256": identity["candidateSha256"],
-                    "candidateDelivery": identity["candidateDelivery"],
-                    "skillDelivery": "project-skill" if variant != "none" else "withheld",
-                    "skillActivation": "explicit-read_skill" if variant != "none" else "withheld",
-                    "skillObserved": parsed["skillObserved"],
-                    "baseSha": base_sha,
-                    "headSha": head_sha,
-                    "sourceRepository": variables.get("source_repository", "muse-skills"),
-                    "museModels": parsed["models"],
-                    "museExpectedModel": configured_model or None,
-                    "museTokenUsage": parsed["usage"] or None,
-                    "candidateTokenStatus": "observed" if parsed["usage"] else "unavailable",
-                    "eventCount": parsed["eventCount"],
-                    "museExitCode": result.returncode,
-                    "controlMode": "project-placeholder" if variant == "none" else None,
-                    "stderrTail": result.stderr[-1000:],
-                },
+                "metadata": metadata,
             }
             if parsed["usage"]:
                 response["tokenUsage"] = parsed["usage"]

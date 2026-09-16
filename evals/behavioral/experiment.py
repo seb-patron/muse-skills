@@ -25,6 +25,7 @@ DEVELOPMENT_V3_MANIFEST = ROOT / "evals/behavioral/candidates/development-v3-man
 DEVELOPMENT_V3_CASES = ROOT / "evals/behavioral/cases/development-v3-cases.yaml"
 DEVELOPMENT_V3_CONFIG = ROOT / "evals/behavioral/development-v3-promptfooconfig.yaml"
 SCREEN_V3_MANIFEST = ROOT / "evals/behavioral/candidates/evidence-claims-v3-screen-manifest.yaml"
+SCREEN_V3_ANSWER_KEYS = ROOT / "evals/behavioral/answer-keys/evidence-claims-v3-screen-v1.yaml"
 SCREEN_V3_CONFIG = ROOT / "evals/behavioral/evidence-claims-v3-screen-promptfooconfig.yaml"
 DEVELOPMENT_PROMPT = ROOT / "evals/behavioral/prompts/review.txt"
 ALLOWED_MODELS = {"gpt-5.6-sol", "gpt-5.6-luna"}
@@ -42,8 +43,9 @@ DEVELOPMENT_PROMPT_SHA256 = "d66dbd7c66ea1747d64e05dad975f57afbc750ffe6c28166cd7
 DEVELOPMENT_V3_MANIFEST_SHA256 = "9207e71c852f3a3aa46e7d426648e9879ad37ace69d4d748959f4eeaa62b2e5a"
 DEVELOPMENT_V3_CASES_SHA256 = "095023d053d9360417203d2b8bb69171fef9028a616d7a4cb991ed6461889dd8"
 DEVELOPMENT_V3_CONFIG_SHA256 = "8f1ce204e5c05885378714b88a412210f9912c4db06093c18445b8e30542c8f1"
-SCREEN_V3_MANIFEST_SHA256 = "849e4950c5bde5801b8d47d47d57adbaffe0f608e2e31e58f3e0bdf5461c0ea3"
-SCREEN_V3_CONFIG_SHA256 = "b084f0a1fb42c81dacac6d4f8a83ee2017a793da224b68726f7908239d702994"
+SCREEN_V3_MANIFEST_SHA256 = "257fb7928b075355e8a13501ed76d248d94355c9efbb18ab2de5e8dc65e03ed9"
+SCREEN_V3_ANSWER_KEYS_SHA256 = "79d596ffe52c304cb0d686eebdb73178b98e7b022c0d666f8e52f9cfaee14e42"
+SCREEN_V3_CONFIG_SHA256 = "132bd9b66cf1aab82154931d9b0ba7f397eb01424176f468b3c347293fc75e59"
 EVIDENCE_CLAIMS_V3_SHA256 = "d357350e83f01429f97aa5903404ffe9342677bb16e39242024878958dfc4477"
 DEVELOPMENT_CASE_IDS = {
     "genv-pr87-first-repair-type-boundary",
@@ -656,8 +658,13 @@ def _validate_v3_profile_config(
     manifest_path: Path,
     provider_labels: dict[str, tuple[str, str]],
     name: str,
+    rubric_grading: bool = True,
 ) -> list[str]:
-    """Pin a config to the development-v3 prompt, cases, grader, rubrics and budgets."""
+    """Pin a config to the development-v3 prompt, cases, grading and budgets.
+
+    With ``rubric_grading`` false the config must carry no LLM grader or rubric,
+    and must quarantine rows through the answer-key boundary assertion.
+    """
 
     errors: list[str] = []
     if hashlib.sha256(config_path.read_bytes()).hexdigest() != config_sha256:
@@ -705,7 +712,10 @@ def _validate_v3_profile_config(
         "config": {"model_reasoning_effort": "high", "sandbox_mode": "read-only", "working_dir": "../.."},
     }
     options = config.get("defaultTest", {}).get("options", {})
-    if options != {"disableVarExpansion": True, "provider": expected_grader}:
+    expected_options = {"disableVarExpansion": True}
+    if rubric_grading:
+        expected_options["provider"] = expected_grader
+    if options != expected_options:
         errors.append(f"{name} grader or variable-expansion boundary changed")
     assertions = config.get("defaultTest", {}).get("assert", [])
     expected_python = {
@@ -721,8 +731,14 @@ def _validate_v3_profile_config(
         "blocking_recall": ({"gold_findings"}, "d2156973fd48d5bbde351be7d37e2c49442708a427efccbcefe5038c09a7c27d"),
         "supported_precision": ({"resolved_findings"}, "7c2a3d7083ce116a587005481b49aaa14d662a69582aebaffa966f0471de48ed"),
     }
-    if not isinstance(assertions, list) or len(assertions) != 9:
-        errors.append(f"{name} must contain exactly six Python and three rubric assertions")
+    if not rubric_grading:
+        expected_rubrics = {}
+    if not rubric_grading:
+        expected_python["answer_key_boundary"] = (
+            "file://assertions/review_contract.py:assert_answer_key_boundary"
+        )
+    if not isinstance(assertions, list) or len(assertions) != len(expected_python) + len(expected_rubrics):
+        errors.append(f"{name} assertion count changed")
         assertions = assertions if isinstance(assertions, list) else []
     by_metric = {item.get("metric"): item for item in assertions if isinstance(item, dict)}
     if set(by_metric) != set(expected_python) | set(expected_rubrics):
@@ -768,8 +784,24 @@ def validate_screen_v3_manifest() -> list[str]:
         or data.get("hash_algorithm") != "sha256"
     ):
         errors.append("v3 screen manifest identity or profile lineage changed")
-    if data.get("tested_runtime") != profile.get("tested_runtime") or data.get("grader") != profile.get("grader"):
-        errors.append("v3 screen must reuse the development v3 runtime and grader")
+    if data.get("tested_runtime") != profile.get("tested_runtime"):
+        errors.append("v3 screen must reuse the development v3 runtime")
+    if (
+        "grader" in data
+        or data.get("grading") != "deterministic-only"
+        or data.get("answer_keys") != "evals/behavioral/answer-keys/evidence-claims-v3-screen-v1.yaml"
+    ):
+        errors.append("v3 screen must be deterministic-only with its frozen answer keys")
+    if hashlib.sha256(SCREEN_V3_ANSWER_KEYS.read_bytes()).hexdigest() != SCREEN_V3_ANSWER_KEYS_SHA256:
+        errors.append("v3 screen answer keys changed after freezing")
+    keys = _load(SCREEN_V3_ANSWER_KEYS)
+    cases = _load(DEVELOPMENT_V3_CASES)
+    verdicts = {c["metadata"]["case_id"]: c["vars"]["expected_verdict"] for c in cases}
+    key_cases = keys.get("cases") if isinstance(keys, dict) else None
+    if not isinstance(key_cases, dict) or {
+        case_id: item.get("expected_verdict") for case_id, item in key_cases.items()
+    } != verdicts:
+        errors.append("v3 screen answer keys must cover the three cases with the case-pack verdicts")
     candidates = data.get("candidates")
     if not isinstance(candidates, list):
         return errors + ["v3 screen candidates must be a list"]
@@ -800,6 +832,7 @@ def validate_screen_v3_config() -> list[str]:
         SCREEN_V3_MANIFEST,
         SCREEN_V3_PROVIDER_LABELS,
         "v3 screen",
+        rubric_grading=False,
     )
 
 
@@ -861,7 +894,8 @@ def main() -> int:
     elif args.command == "validate-evidence-claims-v3-screen":
         print(
             "EVIDENCE-CLAIMS V3 SCREEN VALIDATION PASSED: exact v2/v3 candidates on the "
-            "unchanged development v3 cases, runtime, budgets, grader, and gold boundary"
+            "unchanged development v3 cases, runtime and budgets; deterministic-only "
+            "grading, frozen answer keys, and quarantine assertion"
         )
     else:
         print("SPIKE VALIDATION PASSED: candidates, hashes, frozen splits, budgets, grader, and gold sentinels")

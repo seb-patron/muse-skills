@@ -1,4 +1,4 @@
-description: evidence-claims-v2 versus evidence-claims-v3 screen on the development-v3 profile (issue #18)
+description: evidence-claims-v2 versus evidence-claims-v3 review-only screen on the development-v3 cases (issue #18); deterministic checks, no LLM grader
 
 prompts:
   - file://prompts/review.txt
@@ -32,12 +32,6 @@ providers:
 defaultTest:
   options:
     disableVarExpansion: true
-    provider:
-      id: openai:codex-sdk:gpt-5.6-terra
-      config:
-        model_reasoning_effort: high
-        sandbox_mode: read-only
-        working_dir: ../..
   assert:
     - type: python
       value: file://assertions/review_contract.py:assert_review_contract
@@ -57,44 +51,9 @@ defaultTest:
     - type: python
       value: file://assertions/review_contract.py:assert_evidence
       metric: evidence
-    - type: llm-rubric
-      metric: gold_recall
-      threshold: 0.75
-      value: |
-        Evaluate only whether the candidate review detects each required defect below
-        and describes its concrete impact. Treat semantically equivalent wording as a
-        match. The candidate's severity label does not decide whether the gold defect
-        applies or was detected; record severity agreement separately in the reason.
-        Score equals the fraction of required defects detected. A low gold finding may
-        coexist with an APPROVE verdict under this case contract.
-
-        Required findings:
-        {{gold_findings}}
-    - type: llm-rubric
-      metric: blocking_recall
-      threshold: 0.75
-      value: |
-        Evaluate detection of required findings marked blocking. The gold annotation,
-        not the candidate's severity label, defines this denominator. Count a blocking
-        gold defect as recalled when the review identifies that defect and its concrete
-        impact, even if the review assigns another severity; disclose that severity
-        mismatch in the reason. If there is no blocking gold, score 1 unless the review
-        invents a blocking issue. A timeout or missing final review is an execution
-        error, not zero recall.
-
-        Required findings:
-        {{gold_findings}}
-    - type: llm-rubric
-      metric: supported_precision
-      threshold: 0.75
-      value: |
-        Score actionable findings for a tight location, concrete impact, and direct
-        local reproduction. Penalize resurrection of a resolved finding and claims
-        that a green suite proves more than its executed cases. Score 1 when every
-        actionable finding is supported and no resolved issue is reported as live.
-
-        Resolved findings:
-        {{resolved_findings}}
+    - type: python
+      value: file://assertions/review_contract.py:assert_answer_key_boundary
+      metric: answer_key_boundary
 
 tests: file://cases/development-v3-cases.yaml
 
