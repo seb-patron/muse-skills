@@ -36,10 +36,23 @@ except ImportError:  # Promptfoo loads provider files outside their package.
 VARIANTS = {"none", "current", "candidate"}
 CANDIDATE_PATHS = {
     "evidence-claims-v2": Path("evals/behavioral/candidates/evidence-claims-v2.md"),
+    "evidence-claims-v3": Path("evals/behavioral/candidates/evidence-claims-v3.md"),
     "minimal": Path("evals/behavioral/candidates/minimal.md"),
     "risk-first": Path("evals/behavioral/candidates/risk-first.md"),
     "upstream-adapted": Path("evals/behavioral/candidates/upstream-adapted.md"),
 }
+# The disposable checkout lives under the eval repository (see call_api), so a
+# shell command can still reach grader-only material by path. These names never
+# occur in the historical sources, the review prompt, or the candidate skills.
+GRADER_ONLY_MARKERS = (
+    "gold_findings",
+    "resolved_findings",
+    "development-v2-cases",
+    "development-v3-cases",
+    "miss-diagnosis",
+    "development-v3-calibration",
+)
+WORKSPACE_PREFIX = ".muse-skill-eval-"
 REMOTE_CASE_SOURCES = {
     "gen-v-research-tools": "https://github.com/seb-patron/gen-v-research-tools.git",
 }
@@ -309,6 +322,23 @@ def _parse_muse_stream(stdout: str, skill_name: str) -> dict[str, Any]:
     }
 
 
+def _grader_boundary_breaches(stdout: str, repo_root: Path) -> list[str]:
+    """Name grader-only markers or eval-repository paths outside the checkout in a trace."""
+
+    breaches = {marker for marker in GRADER_ONLY_MARKERS if marker in stdout}
+    root = str(repo_root)
+    start = stdout.find(root)
+    while start != -1:
+        rest = stdout[start + len(root):]
+        # A bare root mention (e.g. a session-root event) opens nothing; a child
+        # path other than the disposable checkout does.
+        if rest.startswith("/") and not rest.startswith(f"/{WORKSPACE_PREFIX}"):
+            breaches.add("eval-repository-path")
+            break
+        start = stdout.find(root, start + len(root))
+    return sorted(breaches)
+
+
 def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     config = options.get("config") or {}
     variables = context.get("vars") or {}
@@ -331,7 +361,7 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
         # clones created outside the configured project root. Keep the clone
         # disposable, but place it under that permitted root so the same provider
         # works in headless desktop runs and in the historical fixture tests.
-        with tempfile.TemporaryDirectory(prefix=".muse-skill-eval-", dir=repo_root) as temp:
+        with tempfile.TemporaryDirectory(prefix=WORKSPACE_PREFIX, dir=repo_root) as temp:
             workspace = Path(temp) / "repo"
             identity = _candidate_identity(
                 repo_root,
@@ -414,6 +444,14 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 return {"error": f"Muse timed out after {timeout_seconds}s: {exc}"}
             latency_ms = round((time.monotonic() - started) * 1000)
             parsed = _parse_muse_stream(result.stdout, skill_name)
+            breaches = _grader_boundary_breaches(result.stdout, repo_root) if spike_run else []
+            if breaches:
+                return {
+                    "error": (
+                        "Muse trace reached grader-only or eval-repository material outside "
+                        f"its historical checkout: {', '.join(breaches)}"
+                    )
+                }
             if result.returncode != 0:
                 detail = result.stderr.strip() or result.stdout[-2000:]
                 return {"error": f"Muse exited {result.returncode}: {detail}"}

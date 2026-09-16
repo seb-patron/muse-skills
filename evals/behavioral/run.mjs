@@ -20,6 +20,7 @@ const spikeConfig = "evals/behavioral/spike-promptfooconfig.yaml";
 const spikeScoring = "evals/behavioral/scoring.py";
 const developmentConfig = "evals/behavioral/development-v2-promptfooconfig.yaml";
 const developmentV3Config = "evals/behavioral/development-v3-promptfooconfig.yaml";
+const screenV3Config = "evals/behavioral/evidence-claims-v3-screen-promptfooconfig.yaml";
 
 const spikeStages = {
   "spike-probe": {
@@ -85,6 +86,26 @@ const developmentStages = {
     config: developmentV3Config,
     preflight: "validate-development-v3",
   },
+  "evidence-claims-v3-screen": {
+    split: "development",
+    cases: [
+      "genv-pr87-first-repair-type-boundary",
+      "genv-pr90-evidence-claim",
+      "genv-pr90-synchronized-clean",
+    ],
+    repeat: 1,
+    providers: ["screen-evidence-claims-v2", "screen-evidence-claims-v3"],
+    expectedRows: 6,
+    output: "evals/behavioral/results/evidence-claims-v3-screen.json",
+    config: screenV3Config,
+    preflight: "validate-evidence-claims-v3-screen",
+  },
+};
+
+const developmentValidateModes = {
+  "development-v2-validate": "validate-development",
+  "development-v3-validate": "validate-development-v3",
+  "evidence-claims-v3-screen-validate": "validate-evidence-claims-v3-screen",
 };
 
 function developmentOutputPaths(settings) {
@@ -143,6 +164,7 @@ const commands = {
   "spike-validate": ["validate", "config", "-c", spikeConfig],
   "development-v2-validate": ["validate", "config", "-c", developmentConfig],
   "development-v3-validate": ["validate", "config", "-c", developmentV3Config],
+  "evidence-claims-v3-screen-validate": ["validate", "config", "-c", screenV3Config],
 };
 
 for (const [stage, settings] of Object.entries(spikeStages)) {
@@ -249,8 +271,7 @@ function verifyExperimentOutput(stageName, settings, finalistLabels) {
 }
 
 const isSpike = mode === "spike-validate" || mode in spikeStages;
-const isDevelopment = mode === "development-v2-validate" ||
-  mode === "development-v3-validate" || mode in developmentStages;
+const isDevelopment = mode in developmentValidateModes || mode in developmentStages;
 const isManagedExperiment = isSpike || isDevelopment;
 let finalistLabels;
 if (mode in developmentStages) {
@@ -305,7 +326,7 @@ if (isDevelopment) {
   }
   const preflight = mode in developmentStages
     ? developmentStages[mode].preflight
-    : mode === "development-v3-validate" ? "validate-development-v3" : "validate-development";
+    : developmentValidateModes[mode];
   if (!runExperimentPreflight([preflight])) process.exit(1);
   if (mode in developmentStages) {
     const reservation = reserveDevelopmentOutput(mode, developmentStages[mode]);

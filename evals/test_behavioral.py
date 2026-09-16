@@ -90,6 +90,101 @@ class BehavioralProviderTests(unittest.TestCase):
                     self.repo, "candidate", "example", "risk-first", "0" * 64
                 )
 
+    def test_delivers_exact_evidence_claims_v3_candidate(self):
+        relative = muse_provider.CANDIDATE_PATHS["evidence-claims-v3"]
+        source = experiment.ROOT / relative
+        (self.repo / relative).parent.mkdir(parents=True)
+        shutil.copyfile(source, self.repo / relative)
+        destination = Path(self.temp.name) / "v3"
+        muse_provider._prepare_workspace(
+            self.repo, destination, self.base, self.head, "candidate", "example", "evidence-claims-v3"
+        )
+        delivered = (destination / ".agents/skills/example/SKILL.md").read_bytes()
+        self.assertEqual(delivered, source.read_bytes())
+        self.assertEqual(hashlib.sha256(delivered).hexdigest(), experiment.EVIDENCE_CLAIMS_V3_SHA256)
+        identity = muse_provider._candidate_identity(
+            experiment.ROOT, "candidate", "example", "evidence-claims-v3",
+            experiment.EVIDENCE_CLAIMS_V3_SHA256,
+        )
+        self.assertEqual(
+            (identity["candidateId"], identity["candidateSha256"]),
+            ("evidence-claims-v3", experiment.EVIDENCE_CLAIMS_V3_SHA256),
+        )
+        with self.assertRaises(muse_provider.ProviderError):
+            muse_provider._candidate_identity(
+                experiment.ROOT, "candidate", "example", "evidence-claims-v3",
+                experiment.SCREEN_V3_MANIFEST_SHA256,
+            )
+
+    def _call_screen_provider(self, trace_for_workspace):
+        relative = muse_provider.CANDIDATE_PATHS["evidence-claims-v3"]
+        (self.repo / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(experiment.ROOT / relative, self.repo / relative)
+        seen = {}
+
+        def fake_run(args, workspace, timeout_seconds, env):
+            seen["workspace"] = workspace
+            seen["args"] = args
+            events = [
+                {"payload_type": "run.started", "payload": {"model": "muse-spark-1.3-contributor"}},
+                {"payload_type": "agent.skill_read.observed", "payload": {"skill_id": "example"}},
+                *trace_for_workspace(workspace),
+                {"payload_type": "run.terminal.completed", "payload": {"text": '{"verdict": "APPROVE"}'}},
+            ]
+            return subprocess.CompletedProcess(args, 0, "\n".join(json.dumps(e) for e in events), "")
+
+        with mock.patch.object(muse_provider, "_prepare_workspace", return_value=(self.base, self.head)):
+            with mock.patch.object(muse_provider.shutil, "which", return_value="/usr/bin/muse"):
+                with mock.patch.object(muse_provider, "_run_muse", side_effect=fake_run):
+                    response = muse_provider.call_api(
+                        "review now",
+                        {
+                            "config": {
+                                "variant": "candidate",
+                                "candidate_id": "evidence-claims-v3",
+                                "candidate_sha256": experiment.EVIDENCE_CLAIMS_V3_SHA256,
+                                "model": "muse-spark-1.3-contributor",
+                                "max_model_steps": 24,
+                                "timeout_seconds": 540,
+                                "repo_root": str(self.repo),
+                            }
+                        },
+                        {"vars": {"base_sha": self.base, "head_sha": self.head, "skill_name": "example"}},
+                    )
+        return response, seen
+
+    def test_screen_provider_records_v3_identity_and_allows_checkout_paths(self):
+        response, seen = self._call_screen_provider(
+            lambda workspace: [
+                {"payload_type": "tool.call", "payload": {"text": f"cat {workspace}/research/note.md"}},
+                {"payload_type": "session.root", "payload": {"text": str(self.repo.resolve())}},
+            ]
+        )
+        self.assertNotIn("error", response)
+        self.assertEqual(response["metadata"]["candidateId"], "evidence-claims-v3")
+        self.assertEqual(response["metadata"]["candidateSha256"], experiment.EVIDENCE_CLAIMS_V3_SHA256)
+        self.assertTrue(response["metadata"]["skillObserved"])
+        self.assertEqual(response["metadata"]["museModels"], ["muse-spark-1.3-contributor"])
+        self.assertIn("--max-model-steps", seen["args"])
+        self.assertEqual(seen["args"][seen["args"].index("--max-model-steps") + 1], "24")
+        self.assertNotIn("gold", seen["args"][-1])
+
+    def test_screen_provider_fails_rows_that_reach_grader_only_material(self):
+        for label, trace in (
+            ("eval repo path", lambda w: [{"payload_type": "tool.call", "payload": {
+                "text": f"cat {self.repo.resolve()}/evals/behavioral/cases/x.yaml"}}]),
+            ("relative case pack", lambda w: [{"payload_type": "tool.call", "payload": {
+                "text": "cat ../../evals/behavioral/cases/development-v3-cases.yaml"}}]),
+            ("gold field", lambda w: [{"payload_type": "tool.result", "payload": {
+                "text": "gold_findings: |"}}]),
+            ("diagnosis report", lambda w: [{"payload_type": "tool.call", "payload": {
+                "text": "ls reports/2026-09-15-evidence-claims-v2-miss-diagnosis.md"}}]),
+        ):
+            with self.subTest(label=label):
+                response, _ = self._call_screen_provider(trace)
+                self.assertIn("grader-only or eval-repository material", response.get("error", ""))
+                self.assertNotIn("output", response)
+
     def test_rejects_non_sha_and_non_ancestor(self):
         with self.assertRaises(muse_provider.ProviderError):
             muse_provider._resolve_commit(self.repo, "HEAD; echo unsafe")
@@ -471,6 +566,56 @@ class SpikeValidationTests(unittest.TestCase):
             "tracked finalization metadata are synchronized",
             control["vars"]["resolved_findings"],
         )
+
+    def test_evidence_claims_v3_screen_configuration(self):
+        self.assertEqual(experiment.validate_screen_v3_manifest(), [])
+        self.assertEqual(experiment.validate_screen_v3_config(), [])
+        config = experiment._load(experiment.SCREEN_V3_CONFIG)
+        profile = experiment._load(experiment.DEVELOPMENT_V3_CONFIG)
+        self.assertEqual(config["tests"], profile["tests"])
+        self.assertEqual(config["defaultTest"], profile["defaultTest"])
+        self.assertEqual(config["evaluateOptions"], profile["evaluateOptions"])
+        self.assertEqual(
+            [(p["label"], p["config"]["candidate_id"]) for p in config["providers"]],
+            [("screen-evidence-claims-v2", "evidence-claims-v2"),
+             ("screen-evidence-claims-v3", "evidence-claims-v3")],
+        )
+        baseline = {k: v for k, v in profile["providers"][1]["config"].items()}
+        for provider in config["providers"]:
+            shared = {k: v for k, v in provider["config"].items() if k not in {"candidate_id", "candidate_sha256"}}
+            self.assertEqual(shared, {k: v for k, v in baseline.items() if k not in {"candidate_id", "candidate_sha256"}})
+
+    def test_evidence_claims_v3_screen_rejects_candidate_and_profile_drift(self):
+        config = experiment._load(experiment.SCREEN_V3_CONFIG)
+        manifest = experiment._load(experiment.SCREEN_V3_MANIFEST)
+        mutations = {
+            "v3 replaced by v2": lambda c: c["providers"][1]["config"].update(
+                candidate_id="evidence-claims-v2",
+                candidate_sha256=manifest["candidates"][0]["sha256"],
+            ),
+            "step budget raised": lambda c: c["providers"][1]["config"].update(max_model_steps=48),
+            "wall clock raised": lambda c: c["providers"][0]["config"].update(timeout_seconds=900),
+            "copied case pack": lambda c: c.update(tests="file://cases/screen-cases.yaml"),
+            "third provider": lambda c: c["providers"].append(copy.deepcopy(c["providers"][0])),
+            "gold exposed to candidate": lambda c: c.update(prompts=["file://prompts/gold.txt"]),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                changed = copy.deepcopy(config)
+                mutate(changed)
+                with mock.patch.object(experiment, "_load", side_effect=[changed, manifest]):
+                    self.assertNotEqual(experiment.validate_screen_v3_config(), [])
+        profile = experiment._load(experiment.DEVELOPMENT_V3_MANIFEST)
+        for label, mutate in {
+            "v3 hash edited": lambda m: m["candidates"][1].update(sha256="0" * 64),
+            "baseline swapped": lambda m: m["candidates"].reverse(),
+            "runtime changed": lambda m: m["tested_runtime"].update(model="other"),
+        }.items():
+            with self.subTest(label=label):
+                changed = copy.deepcopy(manifest)
+                mutate(changed)
+                with mock.patch.object(experiment, "_load", side_effect=[changed, profile]):
+                    self.assertNotEqual(experiment.validate_screen_v3_manifest(), [])
 
     def test_development_v3_rejects_truth_and_rubric_regressions(self):
         cases = experiment._load(experiment.DEVELOPMENT_V3_CASES)
@@ -950,7 +1095,7 @@ class SpikeValidationTests(unittest.TestCase):
         self.assertEqual(development_v3.returncode, 2)
 
     def test_development_runner_refuses_to_overwrite_raw_metrics_or_reservation(self):
-        for mode in ("development-v2", "development-v3"):
+        for mode in ("development-v2", "development-v3", "evidence-claims-v3-screen"):
             output = experiment.ROOT / f"evals/behavioral/results/{mode}.json"
             artifacts = [
                 output,
