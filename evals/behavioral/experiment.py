@@ -742,7 +742,7 @@ def _validate_v3_profile_config(
         ):
             errors.append(f"{metric}: {name} rubric contract changed")
     if config.get("tests") != "file://cases/development-v3-cases.yaml":
-        errors.append(f"{name} must reuse the development v3 case pack")
+        errors.append(f"{name} case pack changed")
     if config.get("sharing") is not False:
         errors.append(f"{name} result sharing must remain disabled")
     prompt = DEVELOPMENT_PROMPT.read_text(encoding="utf-8") if DEVELOPMENT_PROMPT.is_file() else ""

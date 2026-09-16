@@ -43,7 +43,8 @@ CANDIDATE_PATHS = {
 }
 # The disposable checkout lives under the eval repository (see call_api), so a
 # shell command can still reach grader-only material by path. These names never
-# occur in the historical sources, the review prompt, or the candidate skills.
+# occur in the external case sources, the review prompt, or the candidate skills.
+# Historical muse-skills heads do contain them, so the check skips those cases.
 GRADER_ONLY_MARKERS = (
     "gold_findings",
     "resolved_findings",
@@ -444,7 +445,12 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 return {"error": f"Muse timed out after {timeout_seconds}s: {exc}"}
             latency_ms = round((time.monotonic() - started) * 1000)
             parsed = _parse_muse_stream(result.stdout, skill_name)
-            breaches = _grader_boundary_breaches(result.stdout, repo_root) if spike_run else []
+            external_source = variables.get("source_repository") in REMOTE_CASE_SOURCES
+            breaches = (
+                _grader_boundary_breaches(result.stdout, repo_root)
+                if spike_run and external_source
+                else []
+            )
             if breaches:
                 return {
                     "error": (

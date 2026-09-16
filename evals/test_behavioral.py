@@ -116,7 +116,7 @@ class BehavioralProviderTests(unittest.TestCase):
                 experiment.SCREEN_V3_MANIFEST_SHA256,
             )
 
-    def _call_screen_provider(self, trace_for_workspace):
+    def _call_screen_provider(self, trace_for_workspace, source_repository="gen-v-research-tools"):
         relative = muse_provider.CANDIDATE_PATHS["evidence-claims-v3"]
         (self.repo / relative).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(experiment.ROOT / relative, self.repo / relative)
@@ -149,7 +149,10 @@ class BehavioralProviderTests(unittest.TestCase):
                                 "repo_root": str(self.repo),
                             }
                         },
-                        {"vars": {"base_sha": self.base, "head_sha": self.head, "skill_name": "example"}},
+                        {"vars": {
+                            "base_sha": self.base, "head_sha": self.head, "skill_name": "example",
+                            "source_repository": source_repository,
+                        }},
                     )
         return response, seen
 
@@ -184,6 +187,14 @@ class BehavioralProviderTests(unittest.TestCase):
                 response, _ = self._call_screen_provider(trace)
                 self.assertIn("grader-only or eval-repository material", response.get("error", ""))
                 self.assertNotIn("output", response)
+
+    def test_grader_boundary_check_skips_muse_skills_history(self):
+        # Historical muse-skills heads legitimately contain these field names.
+        response, _ = self._call_screen_provider(
+            lambda w: [{"payload_type": "tool.result", "payload": {"text": "gold_findings: |"}}],
+            source_repository="muse-skills",
+        )
+        self.assertNotIn("error", response)
 
     def test_rejects_non_sha_and_non_ancestor(self):
         with self.assertRaises(muse_provider.ProviderError):
