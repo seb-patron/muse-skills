@@ -156,7 +156,11 @@ def promptfoo_rows(payload: Mapping[str, Any], grading: str = "rubric") -> list[
         execution_error = _execution_error(raw, response, output, required)
         completed = execution_error is None
         flags = provider_metadata.get("graderBoundaryFlags")
-        quarantined = bool(flags) or _named_score(raw, "answer_key_boundary") == 0
+        # A row without its complete retained trace cannot be audited.
+        unevaluable_trace = provider_metadata.get("traceStatus") in {"failed", "not-retained"}
+        quarantined = (
+            bool(flags) or unevaluable_trace or _named_score(raw, "answer_key_boundary") == 0
+        )
         converted.append(
             {
                 "case_id": case_metadata.get("case_id"),

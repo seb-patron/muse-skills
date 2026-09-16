@@ -243,6 +243,60 @@ class BehavioralProviderTests(unittest.TestCase):
         self.assertEqual(response["metadata"]["graderBoundaryFlags"], ["gold_findings"])
         self.assertEqual(response["metadata"]["traceStatus"], "retained")
 
+    def test_command_scan_matches_real_muse_tool_result_shape(self):
+        # Mirrors a real `muse exec --json` probe: commands arrive as JSON text in
+        # tool.result and task.lifecycle.output events.
+        def chunk(command):
+            return json.dumps({"chunk_id": "exec-1-1", "command": command, "exit_code": 0,
+                               "terminal_status": "completed", "output": "x\n"}, indent=2)
+
+        def trace(w):
+            return [
+                {"payload_type": "tool.result", "payload": {"kind": "tool_result", "text": chunk("cat README.md")}},
+                {"payload_type": "task.lifecycle.output",
+                 "payload": {"event": {"kind": "output", "chunk": chunk("cat ../notes.txt")}}},
+                {"payload_type": "tool.result",
+                 "payload": {"text": chunk("ls /Users/someone/Documents/Developer")}},
+            ]
+
+        response, _ = self._call_screen_provider(trace, workspace_parent=True)
+        self.assertEqual(
+            response["metadata"]["graderBoundaryFlags"],
+            ["command-absolute-path", "command-traversal"],
+        )
+
+    def test_command_scan_flags_escapes_but_not_ordinary_review_commands(self):
+        workspace = Path("/x/.muse-skill-eval-ab/repo")
+        ordinary = [
+            "git diff c90e9aa..3ecd941 --stat", "git log --oneline base..head",
+            "git show HEAD~1:README.md", "PYTHONPATH=src python3 -m unittest tests.test_q1",
+            "cd src && ls", "grep -rn every research/ 2>/dev/null",
+            f"cat {workspace}/research/note.md", "/usr/bin/env python3 x.py", "cat a.json | jq .",
+        ]
+        escapes = {
+            "cat ../notes.txt": "command-traversal",
+            "cat /Users/u/Documents/x": "command-absolute-path",
+            "cat /private/tmp/x": "command-absolute-path",
+            "ls ~": "command-home-reference",
+            "cat $HOME/.config": "command-home-reference",
+            "cd": "command-directory-change",
+            "cd ..": "command-directory-change",
+            "git -C other log": "command-indirect-access",
+            "git --git-dir=.git log": "command-indirect-access",
+            "cat .git/objects/info/alternates": "command-indirect-access",
+            "python3 -c 'import os; print(os.environ)'": "command-indirect-access",
+        }
+        for command in ordinary:
+            with self.subTest(command=command):
+                self.assertEqual(muse_provider._command_flags(command, workspace), set())
+        for command, flag in escapes.items():
+            with self.subTest(command=command):
+                self.assertIn(flag, muse_provider._command_flags(command, workspace))
+        # Commands the review itself reports are scanned too.
+        review = json.dumps({"checks": [{"command": "cat ../../x", "exit_code": 0}]})
+        stream = json.dumps({"payload_type": "run.terminal.completed", "payload": {"text": review}})
+        self.assertIn("cat ../../x", muse_provider._command_texts(stream))
+
     def test_trace_write_failure_keeps_the_finished_review(self):
         def read_only_traces(w):
             self.trace_dir.chmod(0o500)
@@ -255,6 +309,10 @@ class BehavioralProviderTests(unittest.TestCase):
         self.assertIn("PermissionError", response["metadata"]["traceError"])
         self.assertRegex(response["metadata"]["traceStdoutSha256"], r"^[0-9a-f]{64}$")
         self.assertIn("verdict", response["output"])
+        # Without its complete trace the row cannot be audited, so it is quarantined.
+        self.assertFalse(
+            review_contract.assert_answer_key_boundary("", {"metadata": response["metadata"]})["pass"]
+        )
 
     def test_review_env_hides_eval_harness_paths_and_names(self):
         root = self.repo.resolve()
@@ -876,6 +934,12 @@ class SpikeValidationTests(unittest.TestCase):
         scored = scoring.normalize({"results": {"results": [errored]}}, "deterministic")
         self.assertEqual(scored["aggregate"]["errors"], 1)
         self.assertEqual(scored["aggregate"]["quarantined"], 1)
+        # A completed review whose trace was not kept is unevaluable.
+        untraced = row("a", "v3", "NEEDS_FIXES", "NEEDS_FIXES")
+        untraced["response"]["metadata"]["traceStatus"] = "failed"
+        scored = scoring.normalize({"results": {"results": [untraced]}}, "deterministic")
+        self.assertEqual(scored["aggregate"]["quarantined"], 1)
+        self.assertIsNone(scored["aggregate"]["verdict_accuracy"])
 
     def test_empty_gold_recall_is_not_applicable_but_verdict_still_scores(self):
         scored = scoring.score_row(

@@ -119,11 +119,16 @@ def assert_answer_key_boundary(output: str, context: dict[str, Any]) -> dict[str
     metadata = context.get("metadata") or context.get("providerResponse", {}).get("metadata") or {}
     flags = metadata.get("graderBoundaryFlags")
     checked = metadata.get("graderBoundaryChecked") is True
-    ok = checked and flags == [] and metadata.get("workspaceOutsideEvalRepo") is True
+    trace = metadata.get("traceStatus")
+    ok = (
+        checked and flags == [] and metadata.get("workspaceOutsideEvalRepo") is True
+        and trace == "retained"
+    )
+    # "clear" means no exposure was observed in a complete retained trace.
     reason = (
-        "clear" if ok else
-        f"QUARANTINE: inspect before use (checked={checked}, flags={flags!r}, "
-        f"workspaceOutsideEvalRepo={metadata.get('workspaceOutsideEvalRepo')!r})"
+        "clear (no exposure observed)" if ok else
+        f"QUARANTINE: audit before use (checked={checked}, flags={flags!r}, "
+        f"workspaceOutsideEvalRepo={metadata.get('workspaceOutsideEvalRepo')!r}, trace={trace!r})"
     )
     return _result(ok, 1.0 if ok else 0.0, reason)
 

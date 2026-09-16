@@ -51,33 +51,52 @@ separate authorization.
 | `evidence-claims-v2` | `candidates/evidence-claims-v2.md` | `feea0437ae4f5218a6795d11fd2f31404cc445308159f8946c38b897d87629f6` |
 | `evidence-claims-v3` | `candidates/evidence-claims-v3.md` | `d357350e83f01429f97aa5903404ffe9342677bb16e39242024878958dfc4477` |
 
-## Answer-key boundary
+## Answer-key boundary: detected, not prevented
 
 The review prompt carries no gold. For this stage the runner creates each
 disposable checkout outside the repository, under
-`~/.cache/muse-skill-eval/run-<time>-<pid>/`. The directory above the reviewer
-therefore contains no answer keys.
+`~/.cache/muse-skill-eval/run-<time>-<pid>/`. Muse also gets an environment
+without eval-harness variables or repository PATH entries.
 
-The provider also scans every attempt's event log, including timeouts and
-errors. It looks for:
+**This is not isolation.** A probe run (two Muse calls on a throwaway repo, with
+no private data) showed that Muse's shell sandbox restricts network access but
+not filesystem reads. The reviewer ran `cat ../file`, `cat` on a file elsewhere
+in the home directory, and `ls` of another project folder, and none of those
+was blocked. Every earlier run in this project had the same exposure.
 
-- grader-only field names;
-- case-pack or diagnosis-report filenames;
-- eval-repository paths;
-- sibling paths next to the checkout.
+The owner accepted **detect-and-quarantine** for this six-review development
+screen instead of verified prevention. Muse's own sandbox stays on.
 
-A hit does not fail the row. It records the hit in `graderBoundaryFlags`, and
-the `answer_key_boundary` assertion then marks the row **QUARANTINE**. A
-quarantined row is inspected before use. If exposure is confirmed or
-unresolved, the row is excluded. If the hit is a false positive, the saved
-review is kept and Muse is not rerun.
+The provider scans every attempt's event log, including timeouts and errors.
+It flags:
 
-Limits:
+- grader-only field names, answer-key, case-pack and diagnosis filenames;
+- eval-repository paths, and paths beside the checkout;
+- in every command Muse logged (from `tool.result` and task output events) or
+  reported in its review:
+  - absolute paths outside the checkout; the only exceptions are `/dev/null`
+    and friends, and executables directly in `/bin` or `/usr/bin`;
+  - `..` traversal;
+  - `$HOME` or `~`;
+  - directory changes other than into a plain relative path;
+  - indirect access such as `git -C`, `--git-dir`, alternates, or environment
+    and home lookups.
 
-- The scan is a heuristic. A clean row is not proof that nothing was read.
-- Whether Muse's shell sandbox blocks reads elsewhere in the home directory is
-  not established offline. A one-call probe on a dummy repository is proposed
-  to check it.
+A flag, or a missing or failed trace, marks the row **QUARANTINE**.
+
+Every row is audited before scores are interpreted. The audit separates three
+things: a path that is only *mentioned*, an *attempted* access, and *returned*
+content. A row with confirmed or unresolved exposure is excluded. A cleared
+false positive keeps its saved review, and Muse is never rerun.
+
+A clean scan means **no exposure was observed**, not that none occurred. For
+example, a script that builds a path at runtime, or a Git alternate object
+store, would not necessarily show a path in the command text.
+
+Before a larger run (#19), the reviewer should run under a separate OS identity
+that cannot read the eval repository, grading material, earlier traces, or
+later clones of the case source. Actual read denials and network restrictions
+must be verified first.
 
 ## Evidence retention
 
@@ -90,8 +109,10 @@ records:
 - `durationMs` and `termination`;
 - any token usage Muse emitted.
 
-All six attempts stay in the accounting. Excluded, quarantined and failed rows
-are not dropped. A case missing one side of the v2/v3 pair is inconclusive.
+A row whose trace was not retained cannot be audited, so it is quarantined
+even if its final review survived. All six attempts stay in the accounting;
+excluded, quarantined and failed rows are not dropped. Only eligible v2/v3 pairs
+are compared, and a case that loses either side of its pair is inconclusive.
 
 ## Commands
 
