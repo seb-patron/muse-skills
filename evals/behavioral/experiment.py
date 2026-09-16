@@ -24,6 +24,9 @@ DEVELOPMENT_CONFIG = ROOT / "evals/behavioral/development-v2-promptfooconfig.yam
 DEVELOPMENT_V3_MANIFEST = ROOT / "evals/behavioral/candidates/development-v3-manifest.yaml"
 DEVELOPMENT_V3_CASES = ROOT / "evals/behavioral/cases/development-v3-cases.yaml"
 DEVELOPMENT_V3_CONFIG = ROOT / "evals/behavioral/development-v3-promptfooconfig.yaml"
+SCREEN_V3_MANIFEST = ROOT / "evals/behavioral/candidates/evidence-claims-v3-screen-manifest.yaml"
+SCREEN_V3_ANSWER_KEYS = ROOT / "evals/behavioral/answer-keys/evidence-claims-v3-screen-v1.yaml"
+SCREEN_V3_CONFIG = ROOT / "evals/behavioral/evidence-claims-v3-screen-promptfooconfig.yaml"
 DEVELOPMENT_PROMPT = ROOT / "evals/behavioral/prompts/review.txt"
 ALLOWED_MODELS = {"gpt-5.6-sol", "gpt-5.6-luna"}
 FORBIDDEN_MODELS = {"gpt-6-astra"}
@@ -40,6 +43,10 @@ DEVELOPMENT_PROMPT_SHA256 = "d66dbd7c66ea1747d64e05dad975f57afbc750ffe6c28166cd7
 DEVELOPMENT_V3_MANIFEST_SHA256 = "9207e71c852f3a3aa46e7d426648e9879ad37ace69d4d748959f4eeaa62b2e5a"
 DEVELOPMENT_V3_CASES_SHA256 = "095023d053d9360417203d2b8bb69171fef9028a616d7a4cb991ed6461889dd8"
 DEVELOPMENT_V3_CONFIG_SHA256 = "8f1ce204e5c05885378714b88a412210f9912c4db06093c18445b8e30542c8f1"
+SCREEN_V3_MANIFEST_SHA256 = "257fb7928b075355e8a13501ed76d248d94355c9efbb18ab2de5e8dc65e03ed9"
+SCREEN_V3_ANSWER_KEYS_SHA256 = "79d596ffe52c304cb0d686eebdb73178b98e7b022c0d666f8e52f9cfaee14e42"
+SCREEN_V3_CONFIG_SHA256 = "132bd9b66cf1aab82154931d9b0ba7f397eb01424176f468b3c347293fc75e59"
+EVIDENCE_CLAIMS_V3_SHA256 = "d357350e83f01429f97aa5903404ffe9342677bb16e39242024878958dfc4477"
 DEVELOPMENT_CASE_IDS = {
     "genv-pr87-first-repair-type-boundary",
     "genv-pr90-evidence-claim",
@@ -52,6 +59,11 @@ DEVELOPMENT_PROVIDER_LABELS = {
 DEVELOPMENT_V3_PROVIDER_LABELS = {
     "development-v3-current": ("current", "current"),
     "development-v3-evidence-claims": ("candidate", "evidence-claims-v2"),
+}
+
+SCREEN_V3_PROVIDER_LABELS = {
+    "screen-evidence-claims-v2": ("candidate", "evidence-claims-v2"),
+    "screen-evidence-claims-v3": ("candidate", "evidence-claims-v3"),
 }
 
 
@@ -631,12 +643,35 @@ def validate_development_v3_cases() -> list[str]:
 
 
 def validate_development_v3_config() -> list[str]:
+    return _validate_v3_profile_config(
+        DEVELOPMENT_V3_CONFIG,
+        DEVELOPMENT_V3_CONFIG_SHA256,
+        DEVELOPMENT_V3_MANIFEST,
+        DEVELOPMENT_V3_PROVIDER_LABELS,
+        "development v3",
+    )
+
+
+def _validate_v3_profile_config(
+    config_path: Path,
+    config_sha256: str,
+    manifest_path: Path,
+    provider_labels: dict[str, tuple[str, str]],
+    name: str,
+    rubric_grading: bool = True,
+) -> list[str]:
+    """Pin a config to the development-v3 prompt, cases, grading and budgets.
+
+    With ``rubric_grading`` false the config must carry no LLM grader or rubric,
+    and must quarantine rows through the answer-key boundary assertion.
+    """
+
     errors: list[str] = []
-    if hashlib.sha256(DEVELOPMENT_V3_CONFIG.read_bytes()).hexdigest() != DEVELOPMENT_V3_CONFIG_SHA256:
-        errors.append("development v3 config bytes changed")
-    config = _load(DEVELOPMENT_V3_CONFIG)
+    if hashlib.sha256(config_path.read_bytes()).hexdigest() != config_sha256:
+        errors.append(f"{name} config bytes changed")
+    config = _load(config_path)
     if config.get("prompts") != ["file://prompts/review.txt"]:
-        errors.append("development v3 must use only the canonical review prompt")
+        errors.append(f"{name} must use only the canonical review prompt")
     if (
         not DEVELOPMENT_PROMPT.is_file()
         or hashlib.sha256(DEVELOPMENT_PROMPT.read_bytes()).hexdigest()
@@ -644,19 +679,19 @@ def validate_development_v3_config() -> list[str]:
     ):
         errors.append("canonical development review prompt content changed")
     providers = config.get("providers", [])
-    manifest = _load(DEVELOPMENT_V3_MANIFEST)
+    manifest = _load(manifest_path)
     manifest_by_id = {item.get("id"): item for item in manifest.get("candidates", [])}
-    if len(providers) != 2 or {item.get("label") for item in providers} != set(DEVELOPMENT_V3_PROVIDER_LABELS):
-        errors.append("development v3 must contain exactly two candidate providers")
+    if len(providers) != 2 or {item.get("label") for item in providers} != set(provider_labels):
+        errors.append(f"{name} must contain exactly two candidate providers")
     for provider in providers:
         label = provider.get("label")
-        expected = DEVELOPMENT_V3_PROVIDER_LABELS.get(label)
+        expected = provider_labels.get(label)
         item = provider.get("config", {})
         candidate = manifest_by_id.get(item.get("candidate_id"))
         if expected and (provider.get("id"), item.get("variant"), item.get("candidate_id")) != (
             "file://providers/muse_provider.py", *expected
         ):
-            errors.append(f"{label}: development v3 provider mapping changed")
+            errors.append(f"{label}: {name} provider mapping changed")
         expected_config = {
             "variant": expected[0] if expected else None,
             "candidate_id": expected[1] if expected else None,
@@ -669,16 +704,19 @@ def validate_development_v3_config() -> list[str]:
             "timeout_seconds": 540,
         }
         if item != expected_config:
-            errors.append(f"{label}: development v3 runtime profile changed")
+            errors.append(f"{label}: {name} runtime profile changed")
     if config.get("evaluateOptions") != {"maxConcurrency": 1, "timeoutMs": SPIKE_EVAL_TIMEOUT_MS}:
-        errors.append("development v3 concurrency or timeout changed")
+        errors.append(f"{name} concurrency or timeout changed")
     expected_grader = {
         "id": "openai:codex-sdk:gpt-5.6-terra",
         "config": {"model_reasoning_effort": "high", "sandbox_mode": "read-only", "working_dir": "../.."},
     }
     options = config.get("defaultTest", {}).get("options", {})
-    if options != {"disableVarExpansion": True, "provider": expected_grader}:
-        errors.append("development v3 grader or variable-expansion boundary changed")
+    expected_options = {"disableVarExpansion": True}
+    if rubric_grading:
+        expected_options["provider"] = expected_grader
+    if options != expected_options:
+        errors.append(f"{name} grader or variable-expansion boundary changed")
     assertions = config.get("defaultTest", {}).get("assert", [])
     expected_python = {
         "review_contract": "file://assertions/review_contract.py:assert_review_contract",
@@ -693,15 +731,21 @@ def validate_development_v3_config() -> list[str]:
         "blocking_recall": ({"gold_findings"}, "d2156973fd48d5bbde351be7d37e2c49442708a427efccbcefe5038c09a7c27d"),
         "supported_precision": ({"resolved_findings"}, "7c2a3d7083ce116a587005481b49aaa14d662a69582aebaffa966f0471de48ed"),
     }
-    if not isinstance(assertions, list) or len(assertions) != 9:
-        errors.append("development v3 must contain exactly six Python and three rubric assertions")
+    if not rubric_grading:
+        expected_rubrics = {}
+    if not rubric_grading:
+        expected_python["answer_key_boundary"] = (
+            "file://assertions/review_contract.py:assert_answer_key_boundary"
+        )
+    if not isinstance(assertions, list) or len(assertions) != len(expected_python) + len(expected_rubrics):
+        errors.append(f"{name} assertion count changed")
         assertions = assertions if isinstance(assertions, list) else []
     by_metric = {item.get("metric"): item for item in assertions if isinstance(item, dict)}
     if set(by_metric) != set(expected_python) | set(expected_rubrics):
-        errors.append("development v3 assertion metric set changed")
+        errors.append(f"{name} assertion metric set changed")
     for metric, value in expected_python.items():
         if by_metric.get(metric) != {"type": "python", "value": value, "metric": metric}:
-            errors.append(f"{metric}: development v3 Python assertion changed")
+            errors.append(f"{metric}: {name} Python assertion changed")
     for metric, (variables, digest) in expected_rubrics.items():
         item = by_metric.get(metric, {})
         value = item.get("value")
@@ -712,21 +756,97 @@ def validate_development_v3_config() -> list[str]:
             or hashlib.sha256(value.encode()).hexdigest() != digest
             or set(item) != {"type", "metric", "threshold", "value"}
         ):
-            errors.append(f"{metric}: development v3 rubric contract changed")
+            errors.append(f"{metric}: {name} rubric contract changed")
     if config.get("tests") != "file://cases/development-v3-cases.yaml":
-        errors.append("development v3 case pack changed")
+        errors.append(f"{name} case pack changed")
     if config.get("sharing") is not False:
-        errors.append("development v3 result sharing must remain disabled")
+        errors.append(f"{name} result sharing must remain disabled")
     prompt = DEVELOPMENT_PROMPT.read_text(encoding="utf-8") if DEVELOPMENT_PROMPT.is_file() else ""
     if "gold_findings" in prompt or "resolved_findings" in prompt:
-        errors.append("candidate prompt must keep development v3 gold grader-only")
+        errors.append(f"candidate prompt must keep {name} gold grader-only")
     return errors
+
+
+def validate_screen_v3_manifest() -> list[str]:
+    """Pin the issue #18 screen to exact v2/v3 bytes and the development-v3 runtime."""
+
+    errors: list[str] = []
+    if hashlib.sha256(SCREEN_V3_MANIFEST.read_bytes()).hexdigest() != SCREEN_V3_MANIFEST_SHA256:
+        errors.append("v3 screen manifest bytes changed")
+    data = _load(SCREEN_V3_MANIFEST)
+    profile = _load(DEVELOPMENT_V3_MANIFEST)
+    if (
+        data.get("protocol") != "muse-evidence-claims-v3-screen"
+        or data.get("evaluation_profile") != profile.get("protocol")
+        or data.get("semantic_evaluation_version") != profile.get("semantic_evaluation_version")
+        or data.get("data_role") != "development"
+        or data.get("immutable") is not True
+        or data.get("hash_algorithm") != "sha256"
+    ):
+        errors.append("v3 screen manifest identity or profile lineage changed")
+    if data.get("tested_runtime") != profile.get("tested_runtime"):
+        errors.append("v3 screen must reuse the development v3 runtime")
+    if (
+        "grader" in data
+        or data.get("grading") != "deterministic-only"
+        or data.get("answer_keys") != "evals/behavioral/answer-keys/evidence-claims-v3-screen-v1.yaml"
+    ):
+        errors.append("v3 screen must be deterministic-only with its frozen answer keys")
+    if hashlib.sha256(SCREEN_V3_ANSWER_KEYS.read_bytes()).hexdigest() != SCREEN_V3_ANSWER_KEYS_SHA256:
+        errors.append("v3 screen answer keys changed after freezing")
+    keys = _load(SCREEN_V3_ANSWER_KEYS)
+    cases = _load(DEVELOPMENT_V3_CASES)
+    verdicts = {c["metadata"]["case_id"]: c["vars"]["expected_verdict"] for c in cases}
+    key_cases = keys.get("cases") if isinstance(keys, dict) else None
+    if not isinstance(key_cases, dict) or {
+        case_id: item.get("expected_verdict") for case_id, item in key_cases.items()
+    } != verdicts:
+        errors.append("v3 screen answer keys must cover the three cases with the case-pack verdicts")
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list):
+        return errors + ["v3 screen candidates must be a list"]
+    baseline = next(
+        (item for item in profile.get("candidates", []) if item.get("id") == "evidence-claims-v2"), {}
+    )
+    expected = [
+        {key: baseline.get(key) for key in ("id", "path", "sha256")},
+        {
+            "id": "evidence-claims-v3",
+            "path": "evals/behavioral/candidates/evidence-claims-v3.md",
+            "sha256": EVIDENCE_CLAIMS_V3_SHA256,
+        },
+    ]
+    if [{key: item.get(key) for key in ("id", "path", "sha256")} for item in candidates] != expected:
+        errors.append("v3 screen must compare exactly the frozen v2 and unchanged v3 candidates")
+    for item in candidates:
+        path = ROOT / str(item.get("path", ""))
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item.get("sha256"):
+            errors.append(f"v3 screen candidate {item.get('id')}: missing file or hash mismatch")
+    return errors
+
+
+def validate_screen_v3_config() -> list[str]:
+    return _validate_v3_profile_config(
+        SCREEN_V3_CONFIG,
+        SCREEN_V3_CONFIG_SHA256,
+        SCREEN_V3_MANIFEST,
+        SCREEN_V3_PROVIDER_LABELS,
+        "v3 screen",
+        rubric_grading=False,
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "command", choices=("validate", "validate-heldout", "validate-development", "validate-development-v3")
+        "command",
+        choices=(
+            "validate",
+            "validate-heldout",
+            "validate-development",
+            "validate-development-v3",
+            "validate-evidence-claims-v3-screen",
+        ),
     )
     parser.add_argument("--finalist-label")
     parser.add_argument("--finalist-sha256")
@@ -744,6 +864,13 @@ def main() -> int:
         errors += validate_development_manifest()
         errors += validate_development_cases()
         errors += validate_development_config()
+    elif args.command == "validate-evidence-claims-v3-screen":
+        errors += validate_cases()
+        errors += validate_development_v3_manifest()
+        errors += validate_development_v3_cases()
+        errors += validate_development_v3_config()
+        errors += validate_screen_v3_manifest()
+        errors += validate_screen_v3_config()
     else:
         errors += validate_cases()
         errors += validate_development_v3_manifest()
@@ -763,6 +890,12 @@ def main() -> int:
         print(
             "DEVELOPMENT V3 VALIDATION PASSED: frozen v1/v2 plus corrected development "
             "truth, exact candidates, budgets, grader, and gold boundary"
+        )
+    elif args.command == "validate-evidence-claims-v3-screen":
+        print(
+            "EVIDENCE-CLAIMS V3 SCREEN VALIDATION PASSED: exact v2/v3 candidates on the "
+            "unchanged development v3 cases, runtime and budgets; deterministic-only "
+            "grading, frozen answer keys, and quarantine assertion"
         )
     else:
         print("SPIKE VALIDATION PASSED: candidates, hashes, frozen splits, budgets, grader, and gold sentinels")

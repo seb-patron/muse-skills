@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import {
   hasCompleteNormalizedRows,
   hasExactRowCardinality,
@@ -20,6 +21,7 @@ const spikeConfig = "evals/behavioral/spike-promptfooconfig.yaml";
 const spikeScoring = "evals/behavioral/scoring.py";
 const developmentConfig = "evals/behavioral/development-v2-promptfooconfig.yaml";
 const developmentV3Config = "evals/behavioral/development-v3-promptfooconfig.yaml";
+const screenV3Config = "evals/behavioral/evidence-claims-v3-screen-promptfooconfig.yaml";
 
 const spikeStages = {
   "spike-probe": {
@@ -85,6 +87,29 @@ const developmentStages = {
     config: developmentV3Config,
     preflight: "validate-development-v3",
   },
+  "evidence-claims-v3-screen": {
+    split: "development",
+    cases: [
+      "genv-pr87-first-repair-type-boundary",
+      "genv-pr90-evidence-claim",
+      "genv-pr90-synchronized-clean",
+    ],
+    repeat: 1,
+    providers: ["screen-evidence-claims-v2", "screen-evidence-claims-v3"],
+    expectedRows: 6,
+    output: "evals/behavioral/results/evidence-claims-v3-screen.json",
+    config: screenV3Config,
+    preflight: "validate-evidence-claims-v3-screen",
+    // Disposable checkouts go outside this repository, away from answer keys.
+    outsideWorkspaces: true,
+    grading: "deterministic",
+  },
+};
+
+const developmentValidateModes = {
+  "development-v2-validate": "validate-development",
+  "development-v3-validate": "validate-development-v3",
+  "evidence-claims-v3-screen-validate": "validate-evidence-claims-v3-screen",
 };
 
 function developmentOutputPaths(settings) {
@@ -94,6 +119,7 @@ function developmentOutputPaths(settings) {
     `${output}.metrics-v2.json`,
     `${output}.reservation.json`,
     `${output}.promptfoo`,
+    `${output}.traces`,
   ];
 }
 
@@ -102,8 +128,8 @@ function existingDevelopmentArtifacts(settings) {
 }
 
 function reserveDevelopmentOutput(stageName, settings) {
-  const [output, metrics, reservation, cache] = developmentOutputPaths(settings);
-  const existing = [output, metrics, reservation, cache].filter((path) => existsSync(path));
+  const [output, metrics, reservation, cache, traces] = developmentOutputPaths(settings);
+  const existing = [output, metrics, reservation, cache, traces].filter((path) => existsSync(path));
   if (existing.length > 0) {
     return { ok: false, reason: `existing development result artifacts: ${existing.join(", ")}` };
   }
@@ -119,10 +145,25 @@ function reserveDevelopmentOutput(stageName, settings) {
   }
   try {
     mkdirSync(cache, { mode: 0o700 });
+    mkdirSync(traces, { mode: 0o700 });
   } catch (error) {
     return { ok: false, reason: `unable to create private development cache: ${error.message}` };
   }
-  return { ok: true, reservation, cache };
+  let workspaces;
+  if (settings.outsideWorkspaces) {
+    const base = process.env.MUSE_EVAL_WORKSPACE_BASE ?? join(homedir(), ".cache", "muse-skill-eval");
+    // Neutral name: the stage name is itself an answer-key marker in the trace scan.
+    workspaces = join(resolve(base), `run-${Date.now()}-${process.pid}`);
+    if (workspaces.startsWith(`${resolve(".")}/`)) {
+      return { ok: false, reason: `workspace parent must be outside the repository: ${workspaces}` };
+    }
+    try {
+      mkdirSync(workspaces, { recursive: true, mode: 0o700 });
+    } catch (error) {
+      return { ok: false, reason: `unable to create outside workspace parent: ${error.message}` };
+    }
+  }
+  return { ok: true, reservation, cache, traces, workspaces };
 }
 
 const commands = {
@@ -143,6 +184,7 @@ const commands = {
   "spike-validate": ["validate", "config", "-c", spikeConfig],
   "development-v2-validate": ["validate", "config", "-c", developmentConfig],
   "development-v3-validate": ["validate", "config", "-c", developmentV3Config],
+  "evidence-claims-v3-screen-validate": ["validate", "config", "-c", screenV3Config],
 };
 
 for (const [stage, settings] of Object.entries(spikeStages)) {
@@ -218,11 +260,12 @@ function verifyExperimentOutput(stageName, settings, finalistLabels) {
     return false;
   }
   const metricsOutput = `${output}.metrics-v2.json`;
+  const gradingArgs = settings.grading ? ["--grading", settings.grading] : [];
   const summary = spawnSync(
     process.env.SPIKE_PYTHON ?? "python3",
     process.env.SPIKE_PYTHON
-      ? [spikeScoring, "--input", output, "--output", metricsOutput]
-      : [spikeScoring, "--input", output, "--output", metricsOutput],
+      ? [spikeScoring, "--input", output, "--output", metricsOutput, ...gradingArgs]
+      : [spikeScoring, "--input", output, "--output", metricsOutput, ...gradingArgs],
     { stdio: "inherit", env: process.env },
   );
   if (summary.error || summary.status !== 0) {
@@ -244,13 +287,17 @@ function verifyExperimentOutput(stageName, settings, finalistLabels) {
     );
     return false;
   }
+  if (metrics.aggregate?.quarantined) {
+    console.warn(
+      `${stageName}: ${metrics.aggregate.quarantined} row(s) QUARANTINED; inspect traces before using them`,
+    );
+  }
   console.log(`${stageName}: verified ${rows.length} rows; normalized metrics at ${metricsOutput}`);
   return true;
 }
 
 const isSpike = mode === "spike-validate" || mode in spikeStages;
-const isDevelopment = mode === "development-v2-validate" ||
-  mode === "development-v3-validate" || mode in developmentStages;
+const isDevelopment = mode in developmentValidateModes || mode in developmentStages;
 const isManagedExperiment = isSpike || isDevelopment;
 let finalistLabels;
 if (mode in developmentStages) {
@@ -305,7 +352,7 @@ if (isDevelopment) {
   }
   const preflight = mode in developmentStages
     ? developmentStages[mode].preflight
-    : mode === "development-v3-validate" ? "validate-development-v3" : "validate-development";
+    : developmentValidateModes[mode];
   if (!runExperimentPreflight([preflight])) process.exit(1);
   if (mode in developmentStages) {
     const reservation = reserveDevelopmentOutput(mode, developmentStages[mode]);
@@ -314,6 +361,8 @@ if (isDevelopment) {
       process.exit(2);
     }
     console.log(`${mode} reserved result custody at ${reservation.reservation}`);
+    process.env.MUSE_EVAL_TRACE_DIR = reservation.traces;
+    if (reservation.workspaces) process.env.MUSE_EVAL_WORKSPACE_PARENT = reservation.workspaces;
   }
 }
 
