@@ -1,0 +1,46 @@
+Review the committed change at {{head_sha}} against base {{base_sha}}.
+
+Change summary supplied by the author:
+{{change_summary}}
+{% if pr_body_snapshot %}
+Pull request title and description published on the reviewed pull request:
+
+{{pr_title_snapshot}}
+
+{{pr_body_snapshot}}
+{% endif %}
+Work only from the local repository and its Git history. Do not use the network and do
+not edit tracked files. Use relevant project skills if they are available. Run focused
+commands that can confirm or refute suspected problems; a green suite alone is not proof.
+
+Return exactly one JSON object with this shape and no Markdown fence:
+{
+  "head_sha": "the reviewed full or abbreviated SHA",
+  "verdict": "APPROVE or NEEDS_FIXES",
+  "summary": "short review summary",
+  "findings": [
+    {
+      "severity": "blocking, should-fix, or low",
+      "location": "path:line",
+      "impact": "what fails and for whom",
+      "repro": {
+        "command": "exact command or experiment",
+        "exit_code": 0,
+        "output": "relevant observed output"
+      }
+    }
+  ],
+  "checks": [
+    {
+      "command": "exact command that was run",
+      "exit_code": 0,
+      "output": "short relevant output"
+    }
+  ],
+  "unrun": ["important check that was not run and why"],
+  "revision_rounds": "0/3"
+}
+
+Use an empty findings array only when no actionable issue remains. NEEDS_FIXES means at
+least one blocking or should-fix finding; APPROVE means neither remains. Never infer that
+a documented limitation is a defect unless it contradicts the stated scope.

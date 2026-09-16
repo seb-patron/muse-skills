@@ -1,0 +1,28 @@
+protocol: muse-adversarial-review-development-v4
+semantic_evaluation_version: muse-review-metrics-v2
+data_role: development
+immutable: true
+hash_algorithm: sha256
+supersedes_profile: muse-adversarial-review-development-v3
+snapshot_manifest: evals/behavioral/fixtures/genv-pr87/SNAPSHOTS.yaml
+adds_family: genv-pr87 repair-chain stages A, C, and D
+tested_runtime:
+  provider: muse
+  model: muse-spark-1.3-contributor
+  reasoning_effort: high
+grader:
+  provider: openai:codex-sdk
+  model: gpt-5.6-terra
+  reasoning_effort: high
+  role: independent scorer; never the tested candidate or the source of human gold
+candidates:
+  - id: current
+    label: Current production skill
+    path: skills/adversarial-review/SKILL.md
+    sha256: dd4f217a140beb155f209f9215932fa44e84936096796ade725f49199c239380
+    source: exact candidate retained from development v2 and v3
+  - id: evidence-claims-v2
+    label: Exact-boundary and evidence-claim candidate v2
+    path: evals/behavioral/candidates/evidence-claims-v2.md
+    sha256: feea0437ae4f5218a6795d11fd2f31404cc445308159f8946c38b897d87629f6
+    source: exact candidate retained from development v2 and v3

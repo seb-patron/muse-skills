@@ -1,0 +1,293 @@
+- description: "[development] Gen V PR #87 first repair exact-boundary case"
+  metadata:
+    case_id: genv-pr87-first-repair-type-boundary
+    family: genv-pr87
+    split: development
+    data_role: development
+    gold_status: independently-reproduced-development
+    human_adjudication: false
+    exposure: disclosed-before-candidate-freeze
+    source: https://github.com/seb-patron/gen-v-research-tools/pull/87
+    review_provenance: https://github.com/seb-patron/gen-v-research-tools/pull/87#issuecomment-5658445369
+    reproduction: >-
+      At the frozen head, an independently constructed synthetic summary changed
+      execution.frames from integer 3600 to float 3600.0; assemble() accepted it
+      and emitted `float 3600.0`. No commercial input or emulator run was used.
+  vars:
+    source_repository: gen-v-research-tools
+    base_sha: b5eb2e15da936b33f9d6703b2a347777affe1c05
+    base_tree_sha: f09830fc326462a0916142c84671094be4c0cfa9
+    head_sha: 8850ee389109d22bd2ce7b4d3a23ae50ff3c1ddc
+    head_tree_sha: 0550846f60851b5033a4d48ad109fc6bb19b2c35
+    skill_name: adversarial-review
+    expected_verdict: NEEDS_FIXES
+    change_summary: >-
+      Adds a bounded shifted-press research probe, runner, fixture assembler,
+      hash-only durable fixture, research note, and synthetic validation. The
+      assembler validates a nested runner summary before publishing a fixture.
+    gold_findings: |
+      1. nested-numeric-type-alias (blocking): The assembler compares trusted
+         nested structures with ordinary Python equality and then emits caller-shaped
+         values. Equal-valued numeric aliases such as execution.frames=3600.0 in
+         place of integer 3600 are accepted, so the claimed exact structured boundary
+         is false and untrusted scalar types can enter the durable fixture.
+    resolved_findings: |
+      Earlier path-loader/privacy, framebuffer-precondition, and unmatched-contrast
+      findings are repaired at this head and must not be reported as still present.
+
+- description: "[development] Gen V PR #90 published evidence-claim case"
+  metadata:
+    case_id: genv-pr90-evidence-claim
+    family: genv-pr90
+    split: development
+    data_role: development
+    gold_status: independently-reproduced-development
+    human_adjudication: false
+    exposure: disclosed-before-candidate-freeze
+    source: https://github.com/seb-patron/gen-v-research-tools/pull/90
+    review_provenance: https://github.com/seb-patron/gen-v-research-tools/pull/90#issuecomment-5666657534
+    reproduction: >-
+      Independent arithmetic over the committed hash-only fixture found 11 changes
+      among 13 adjacent intervals for both repetitions of every control arm, with
+      [2299,2300] and [2303,2304] stable, contradicting the tracked note's `every`
+      claim. No commercial input or emulator run was used.
+  vars:
+    source_repository: gen-v-research-tools
+    base_sha: c90e9aa89e483e44574335646d0ffa49ac92423e
+    base_tree_sha: 82d4e13d101e7474af6eb2344baf9f00d029f5db
+    head_sha: 3ecd94150e5030b88b1111d17706d6f4c0063ed4
+    head_tree_sha: 3114db9214dc16ca46037ddbaa0d60b292b9e994
+    skill_name: adversarial-review
+    expected_verdict: NEEDS_FIXES
+    change_summary: >-
+      Adds a bounded facing-response sweep, runner, fixture assembler, hash-only
+      durable fixture, required research note, reading-trail entry, and synthetic
+      validation after an authorized sixteen-invocation evidence run.
+    gold_findings: |
+      1. overstated-control-animation (should-fix): The research note says all four
+         controls differ at every adjacent checkpoint pair, but direct recomputation
+         from the committed fixture yields 11 of 13 changing intervals for every
+         retained control attempt. [2299,2300] and [2303,2304] are stable, so the
+         merge-critical negative-control claim exceeds its durable evidence.
+    resolved_findings: NONE. This is the defect-bearing evidence head.
+
+- description: "[development] Gen V PR #90 synchronized nonempty approval control"
+  metadata:
+    case_id: genv-pr90-synchronized-clean
+    family: genv-pr90
+    split: development
+    data_role: development
+    gold_status: independently-reproduced-development
+    human_adjudication: false
+    exposure: disclosed-before-candidate-freeze
+    source: https://github.com/seb-patron/gen-v-research-tools/pull/90
+    review_provenance: bounded independent exact-head recheck; no claim of human adjudication
+    reproduction: >-
+      The nonempty base-to-head change passed 74 focused tests, the privacy gate,
+      tracked-input integrity, and diff whitespace checks. Independent source review
+      confirmed the evidence correction and one remaining low review-history metadata
+      mismatch with no behavioral or evidence impact. The full suite and hosted checks
+      were not rerun, so this oracle remains limited to the changed artifacts and gates.
+  vars:
+    source_repository: gen-v-research-tools
+    base_sha: c90e9aa89e483e44574335646d0ffa49ac92423e
+    base_tree_sha: 82d4e13d101e7474af6eb2344baf9f00d029f5db
+    head_sha: e45d8eb3be5edfd2315f021119063401d5beb794
+    head_tree_sha: f9e8b6282ed3e84f3cce84d2b6b475952e11d381
+    skill_name: adversarial-review
+    expected_verdict: APPROVE
+    change_summary: >-
+      Adds the complete bounded facing-response sweep and its finalized evidence,
+      documentation, assembler, runner, and focused synthetic validation.
+    gold_findings: |
+      1. review-history-metadata-mismatch (low): A remaining review-round count in
+         tracked history disagrees with the finalized research note. The mismatch
+         does not invalidate the fixture, evidence claim, or focused gates, so the
+         expected terminal verdict remains APPROVE.
+    resolved_findings: |
+      overstated-control-animation is repaired: every retained control attempt is
+      described as 11 of 13 changing intervals and both stable pairs are named.
+
+- description: "[development] Gen V PR #87 stage A initial implementation with its live body snapshot"
+  metadata:
+    case_id: genv-pr87-initial-implementation
+    family: genv-pr87
+    split: development
+    data_role: development
+    gold_status: proposed-pending-human-adjudication
+    human_adjudication: false
+    exposure: disclosed-before-candidate-freeze
+    chain_stage: a
+    source: https://github.com/seb-patron/gen-v-research-tools/pull/87
+    review_provenance: https://github.com/seb-patron/gen-v-research-tools/pull/87#issuecomment-5658174625
+    pr_body_edited_at: "2026-09-14T01:56:04Z"
+    pr_body_file: pr-body-stage-a-20260914T015604Z.md
+    pr_body_sha256: 14b985fcd69012bb6b2074853ddf73f88cca0a4505d66120bb1a3b4a68cc0213
+    pr_body_delivered_sha256: bad6abe5539f0617d2b9fe37fb265e27fb14186f2e1c7354fe3b284fc1861dd3
+    hosted_checks_at_head: guard success; python-tests success
+    reproduction: >-
+      All four findings were reproduced independently on this frozen head with
+      synthetic inputs only, no emulator invocation and no commercial input, by
+      `PYTHONPATH=src python3 probe_stage.py` (exit 0): a symlinked synthetic summary
+      with path-bearing caller identity was accepted and re-emitted; truthy string
+      repeatability receipts were accepted and re-emitted; a synthetic arm whose
+      framebuffer differed from control at the first checkpoint still exited 0 with
+      validity accepted and pre_intervention_equality pass; and a quadrant with equal
+      contrast offsets {0, 4} plus an extra unmatched contrast at frame 3600 classified
+      as timing-shift-supported. The same four probes are refused at 33d850d.
+    unadjudicated_observation: >-
+      The stage-A body reports 2884 insertions and a 66-line reading-trail entry while
+      `git diff --shortstat` for this head reports 2888 insertions and 68 lines. This
+      possible extra finding is deliberately excluded from gold until a human
+      adjudicates it.
+  vars:
+    source_repository: gen-v-research-tools
+    base_sha: b5eb2e15da936b33f9d6703b2a347777affe1c05
+    base_tree_sha: f09830fc326462a0916142c84671094be4c0cfa9
+    head_sha: 122108e791e5d856200cfcde6e20a4998194b117
+    head_tree_sha: ac68ddc1e1b296969b912751b7f37892ec02cb5a
+    skill_name: adversarial-review
+    expected_verdict: NEEDS_FIXES
+    pr_body_stage: a
+    pr_title_snapshot: file://fixtures/genv-pr87/snapshot_var.py
+    pr_body_snapshot: file://fixtures/genv-pr87/snapshot_var.py
+    change_summary: >-
+      Adds a bounded shifted-press research probe, runner, fixture assembler, hash-only
+      durable fixture, research note, reading-trail entry, and synthetic validation from
+      an owner-authorized bounded evidence run. The assembler validates a nested runner
+      summary before publishing the durable fixture.
+    gold_findings: |
+      1. path-free-allowlist-bypass (blocking): The assembler reads the runner summary
+         with a direct byte read instead of the bounded no-follow loader, and emits
+         caller-supplied fixture identity, issue, repeatability method, and the whole
+         repeatability mapping without exact shape validation. A symlinked input and
+         path-bearing caller values are therefore accepted and published into the
+         durable fixture.
+      2. repeatability-not-independently-bound (blocking): The runner collapses both
+         repetitions of an arm into one retained result and the assembler only tests the
+         repeatability receipt for truthiness, so a truthy non-boolean receipt still
+         yields a fixture asserting twice-deterministic evidence that the durable
+         artifact cannot establish.
+      3. missing-framebuffer-pre-intervention-control (blocking): Pre-intervention
+         equality compares RAM digests only, so an arm whose framebuffer already differs
+         from control before the scheduled press is still accepted and its later
+         divergence is published as observed manipulation evidence.
+      4. classifier-prose-mismatch (should-fix): A quadrant whose common contrast offset
+         sets match classifies as timing-shift-supported even when one arm carries an
+         additional unmatched later contrast, contradicting the documented
+         state-dependent/unresolved rule in the research note.
+    resolved_findings: |
+      NONE. This is the initial defect-bearing head of the chain; no earlier finding
+      exists that could be wrongly resurrected here.
+
+- description: "[development] Gen V PR #87 stage C merge-ready code with a stale live body"
+  metadata:
+    case_id: genv-pr87-merge-ready-stale-body
+    family: genv-pr87
+    split: development
+    data_role: development
+    gold_status: proposed-pending-human-adjudication
+    human_adjudication: false
+    exposure: disclosed-before-candidate-freeze
+    chain_stage: c
+    source: https://github.com/seb-patron/gen-v-research-tools/pull/87
+    review_provenance: >-
+      No separate public review comment exists for 33d850d. This stage is sourced from
+      the public userContentEdits body snapshot recorded at 2026-09-14T03:23:11Z.
+    pr_body_edited_at: "2026-09-14T03:23:11Z"
+    pr_body_file: pr-body-stage-c-20260914T032311Z.md
+    pr_body_sha256: b9fa99e3457b8b82ec9f510a02d1b4fcc0fdc94bf784199d160ccc61af6e72a4
+    pr_body_delivered_sha256: 27eb17e7bfbf53d254acec3cc29f7dfe7f918aa336638ab49cb0a931bdcbeb86
+    hosted_checks_at_head: guard success; python-tests success
+    reproduction: >-
+      The body-drift finding was reproduced from public committed material only:
+      `git diff --shortstat b5eb2e1 33d850d` (exit 0) reports 3585 insertions and
+      `git diff --numstat` reports 97 added lines in the reading trail, while this body
+      snapshot still reports 2884 insertions and a 66-line entry, and still presents the
+      superseded exact-head approval of 8850ee3 as current. The four stage-A probes and
+      the two stage-B blockers are all refused at this head, so no code blocker remains.
+  vars:
+    source_repository: gen-v-research-tools
+    base_sha: b5eb2e15da936b33f9d6703b2a347777affe1c05
+    base_tree_sha: f09830fc326462a0916142c84671094be4c0cfa9
+    head_sha: 33d850d8f1e2f4870f952c88fdaf6b13c76700d5
+    head_tree_sha: 82d4e13d101e7474af6eb2344baf9f00d029f5db
+    skill_name: adversarial-review
+    expected_verdict: NEEDS_FIXES
+    pr_body_stage: c
+    pr_title_snapshot: file://fixtures/genv-pr87/snapshot_var.py
+    pr_body_snapshot: file://fixtures/genv-pr87/snapshot_var.py
+    change_summary: >-
+      Adds the bounded shifted-press probe with two repair rounds: an allowlisted
+      assembler boundary, exact repeatability receipts, framebuffer pre-intervention
+      gates, a tightened classifier rule, and recursive exact-type validation with
+      trusted-structure emission.
+    gold_findings: |
+      1. stale-live-pr-body (should-fix): The reviewed code and committed documents carry
+         no remaining blocker, but the live pull-request description published with this
+         head still presents the superseded exact-head approval of the earlier repair as
+         current and still reports the earlier diff statistics (2884 insertions and a
+         66-line reading-trail entry) instead of this head's 3585 insertions and 97-line
+         entry. The merge artifact is therefore not ready even though the Git head is.
+    resolved_findings: |
+      The stage-A path-loader/privacy boundary, repeatability receipt shape,
+      framebuffer pre-intervention control, and unmatched-contrast classifier rule are
+      repaired, and the stage-B exact-type boundary is repaired by recursive exact-type
+      validation with trusted-structure emission. The repeatability claim is resolved by
+      the authorized no-new-run route that limits it to an Observation. None of these
+      may be reported as still live, and an earlier exact-head code approval must not be
+      reused as approval of this merge artifact.
+
+- description: "[development] Gen V PR #87 stage D same code with the corrected body snapshot"
+  metadata:
+    case_id: genv-pr87-merge-ready-corrected-body
+    family: genv-pr87
+    split: development
+    data_role: development
+    gold_status: proposed-pending-human-adjudication
+    human_adjudication: false
+    exposure: disclosed-before-candidate-freeze
+    chain_stage: d
+    source: https://github.com/seb-patron/gen-v-research-tools/pull/87
+    review_provenance: >-
+      No separate public review comment exists for 33d850d. This stage is sourced from
+      the public userContentEdits body snapshot recorded at 2026-09-14T03:39:14Z, which
+      is also the live body of the merged pull request.
+    pr_body_edited_at: "2026-09-14T03:39:14Z"
+    pr_body_file: pr-body-stage-d-20260914T033914Z.md
+    pr_body_sha256: 2e732b22ea7493c855158c1211e9a1d5d387dd670856b4bebaa2b3738ab83056
+    pr_body_delivered_sha256: c9dd52bae11bd122318c815831b600e9bcaa44aea17368fc9b2d68bfbc5f6fe3
+    hosted_checks_at_head: guard success; python-tests success
+    reproduction: >-
+      The scoped clean status was checked on public committed material only: the four
+      stage-A probes and the two stage-B blockers are all refused at this head, the
+      focused suite discovers and passes 52 tests
+      (`PYTHONPATH=src python3 -m unittest tests.test_q1_shifted_press_probe`, exit 0),
+      and this body's 3585 insertions and 97-line reading-trail entry match
+      `git diff --shortstat` and `git diff --numstat` for the same range. The full
+      standard-library suite, the privacy gate, and hosted checks were not rerun here,
+      so the oracle is limited to the changed artifacts and this body snapshot.
+  vars:
+    source_repository: gen-v-research-tools
+    base_sha: b5eb2e15da936b33f9d6703b2a347777affe1c05
+    base_tree_sha: f09830fc326462a0916142c84671094be4c0cfa9
+    head_sha: 33d850d8f1e2f4870f952c88fdaf6b13c76700d5
+    head_tree_sha: 82d4e13d101e7474af6eb2344baf9f00d029f5db
+    skill_name: adversarial-review
+    expected_verdict: APPROVE
+    pr_body_stage: d
+    pr_title_snapshot: file://fixtures/genv-pr87/snapshot_var.py
+    pr_body_snapshot: file://fixtures/genv-pr87/snapshot_var.py
+    change_summary: >-
+      Adds the bounded shifted-press probe with two repair rounds: an allowlisted
+      assembler boundary, exact repeatability receipts, framebuffer pre-intervention
+      gates, a tightened classifier rule, and recursive exact-type validation with
+      trusted-structure emission.
+    gold_findings: NONE
+    resolved_findings: |
+      Every stage-A and stage-B finding is repaired at this head, the repeatability
+      claim is limited to an Observation under the authorized no-new-run route, and the
+      superseded approval wording and stale diff statistics are corrected in this body
+      snapshot. The expected review approves this merge artifact without resurrecting
+      any superseded finding and without inventing a code change that the identical
+      stage-C tree does not contain.

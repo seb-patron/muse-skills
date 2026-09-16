@@ -1,0 +1,158 @@
+# Frozen PR-body snapshots for the Gen V PR #87 repair chain: digests and provenance only.
+#
+# gen-v-research-tools is private and this repository is public, so no snapshot text is
+# committed here. Only SHA-256 digests, timestamps, and the extraction query live in Git.
+# The sanitized text is held in a local directory outside the repository and is verified
+# against these digests before it is delivered to a candidate; see snapshot_var.py and
+# DEVELOPMENT_V4.md.
+source_repository: gen-v-research-tools
+pull_request: 87
+pull_request_url: https://github.com/seb-patron/gen-v-research-tools/pull/87
+pull_request_title_file: pr-title.txt
+pull_request_title_file_sha256: 3e6d1056ddb8f9323dff0168ae8f61a0f455b9c20723023eee03ce02e418d6cb
+pull_request_title_sha256: b20a3163278483ad1ffabe3f94f82dda22da6a9f4165b55034f57c9116bf779a
+exported_at: "2026-09-15"
+live_body_stage: d
+total_edits_reported: 5
+stored_snapshots: 4
+storage:
+  committed_here: digests, timestamps, provenance, and the extraction query only
+  text_location: a local directory outside this repository
+  environment_variable: GENV_PR87_SNAPSHOT_DIR
+  default_directory: ~/.local/share/muse-skills/genv-pr87-snapshots
+  verification: >-
+    Every file is checked against both its stored and its delivered (trimmed) digest
+    before delivery. A missing directory or any digest mismatch fails loudly and no
+    unverified text is ever delivered.
+extraction_command: >-
+  gh api graphql -F owner=seb-patron -F name=gen-v-research-tools -F number=87
+  -F query=@query.graphql
+extraction_query: |
+  query($owner: String!, $name: String!, $number: Int!) {
+    repository(owner: $owner, name: $name) {
+      pullRequest(number: $number) {
+        number
+        title
+        createdAt
+        lastEditedAt
+        mergedAt
+        baseRefOid
+        headRefOid
+        body
+        userContentEdits(first: 100) {
+          totalCount
+          pageInfo { hasNextPage endCursor }
+          nodes { id createdAt editedAt updatedAt deletedAt editor { login } diff }
+        }
+      }
+    }
+  }
+extraction_result:
+  user_content_edits_total: 5
+  has_next_page: false
+  live_body_equals_stage: d
+  editor: seb-patron
+sanitization:
+  applied_to: every snapshot, before hashing
+  rules:
+    - id: commercial-title
+      description: >-
+        The commercial title token is replaced with a fixed placeholder. The token itself
+        is not recorded here, because naming it would republish the identity the gen-v
+        repository forbids in pull requests.
+      replacement: "[redacted-commercial-title]"
+    - id: truncated-input-digest
+      description: >-
+        Truncated ROM, save, adapter, and emulator digests are replaced with a fixed
+        placeholder; they identify private inputs.
+      replacement: "`[redacted-input-digest]`"
+  replacements_per_snapshot: 5
+  normalization:
+    - id: trailing-blank-line
+      description: >-
+        Stored snapshots end with exactly one newline. Only trailing blank lines at end
+        of file are affected, so the delivered (trimmed) text is byte-identical to the
+        sanitized export.
+  unchanged_otherwise: true
+  proof: >-
+    Digest equality against delivered_sha256 is what proves a delivered body is exactly
+    the sanitized export, since the redaction rules were applied before hashing.
+chain:
+  base_sha: b5eb2e15da936b33f9d6703b2a347777affe1c05
+  base_tree_sha: f09830fc326462a0916142c84671094be4c0cfa9
+  order: [a, b, c, d]
+  merge_commit: c90e9aa89e483e44574335646d0ffa49ac92423e
+  merged_at: "2026-09-14T03:42:00Z"
+stages:
+  a:
+    label: initial implementation
+    file: pr-body-stage-a-20260914T015604Z.md
+    edited_at: "2026-09-14T01:56:04Z"
+    head_sha: 122108e791e5d856200cfcde6e20a4998194b117
+    head_tree_sha: ac68ddc1e1b296969b912751b7f37892ec02cb5a
+    raw_export_sha256: 149f0e7c2160c78d44600022b0de8c8340d3ac65ff0a9f35d011d35f10152d6b
+    sha256: 14b985fcd69012bb6b2074853ddf73f88cca0a4505d66120bb1a3b4a68cc0213
+    delivered_sha256: bad6abe5539f0617d2b9fe37fb265e27fb14186f2e1c7354fe3b284fc1861dd3
+    review_provenance: https://github.com/seb-patron/gen-v-research-tools/pull/87#issuecomment-5658174625
+    used_by_case: genv-pr87-initial-implementation
+  b:
+    label: first repair
+    file: pr-body-stage-b-20260914T025020Z.md
+    edited_at: "2026-09-14T02:50:20Z"
+    head_sha: 8850ee389109d22bd2ce7b4d3a23ae50ff3c1ddc
+    head_tree_sha: 0550846f60851b5033a4d48ad109fc6bb19b2c35
+    raw_export_sha256: 47f2ad13d7b22736f4f412b89295e9853cf8ad87e808d36cf7f9c81413521490
+    sha256: d0d35f5a0b700fc348d7a2a8e5b8955857d586152f9c9fbff0f4712c4964d08c
+    delivered_sha256: 4a123c7e03d93d6be744de4344ac2b74a675ddf6cb2adb04601bc7fa5dcd0511
+    review_provenance: https://github.com/seb-patron/gen-v-research-tools/pull/87#issuecomment-5658445369
+    used_by_case: null
+    note: >-
+      Frozen for completeness of the chain. The retained development v3 stage-B case
+      (genv-pr87-first-repair-type-boundary) is unchanged in v4 and therefore does not
+      receive a body snapshot yet.
+  c:
+    label: code and documents fixed, live body stale
+    file: pr-body-stage-c-20260914T032311Z.md
+    edited_at: "2026-09-14T03:23:11Z"
+    head_sha: 33d850d8f1e2f4870f952c88fdaf6b13c76700d5
+    head_tree_sha: 82d4e13d101e7474af6eb2344baf9f00d029f5db
+    raw_export_sha256: 808966964bb112af53ae93ef826f0160ce03753e45d364d2881c317b671f03c5
+    sha256: b9fa99e3457b8b82ec9f510a02d1b4fcc0fdc94bf784199d160ccc61af6e72a4
+    delivered_sha256: 27eb17e7bfbf53d254acec3cc29f7dfe7f918aa336638ab49cb0a931bdcbeb86
+    review_provenance: >-
+      No separate public review comment exists for this head; provenance is the
+      userContentEdits snapshot only.
+    used_by_case: genv-pr87-merge-ready-stale-body
+  d:
+    label: same code, corrected body
+    file: pr-body-stage-d-20260914T033914Z.md
+    edited_at: "2026-09-14T03:39:14Z"
+    head_sha: 33d850d8f1e2f4870f952c88fdaf6b13c76700d5
+    head_tree_sha: 82d4e13d101e7474af6eb2344baf9f00d029f5db
+    raw_export_sha256: 25864f4aa6261f8bcddac5e20ee8782c99573a7ff20188ee1cf0c30175defe7b
+    sha256: 2e732b22ea7493c855158c1211e9a1d5d387dd670856b4bebaa2b3738ab83056
+    delivered_sha256: c9dd52bae11bd122318c815831b600e9bcaa44aea17368fc9b2d68bfbc5f6fe3
+    review_provenance: >-
+      No separate public review comment exists for this head; provenance is the
+      userContentEdits snapshot, which is also the live body of the merged pull request.
+    used_by_case: genv-pr87-merge-ready-corrected-body
+edits_not_stored:
+  - edited_at: "2026-09-14T02:46:03Z"
+    raw_export_sha256: 693d139b04c870a58a291f3dd59bbec6b03ab052f7186496a9ff65b9221acb12
+    reason: >-
+      Intermediate edit between stages A and B that no frozen stage uses. Its digest is
+      recorded so the export remains complete and auditable.
+known_exemption:
+  id: stage-d-review-link
+  description: >-
+    The authentic stage D body links to the public stage-B review comment URL. The link
+    is part of the real merge artifact and is retained in the snapshot, while the review
+    comment's own text stays grader-only. Candidate runs have no network access, so the
+    URL cannot be dereferenced during an evaluation.
+hosted_checks:
+  "122108e791e5d856200cfcde6e20a4998194b117":
+    guard: success
+    python-tests: success
+  "33d850d8f1e2f4870f952c88fdaf6b13c76700d5":
+    guard: success
+    python-tests: success
