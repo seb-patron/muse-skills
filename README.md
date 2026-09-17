@@ -82,6 +82,13 @@ The evidence-backed retain/replace/retire spike is documented in
 [evals/behavioral/SPIKE.md](evals/behavioral/SPIKE.md). It is experimental and
 does not alter the promoted `adversarial-review` skill.
 
+The disclosed development calibration has immutable v2 evidence and an additive
+[corrected v3 profile](evals/behavioral/DEVELOPMENT_V3.md). A
+[sanitized calibration report](evals/behavioral/reports/2026-09-14-development-v3-calibration.md)
+explains the grader-only replay over saved v2 reviews. Offline validation is
+available as `npm run eval:development-v3:validate`; the replay made no fresh Muse
+candidate calls and does not imply that the v3 candidate command was run.
+
 ## Operator notes
 
 Day-to-day lore for running review loops in Muse sessions on this machine —

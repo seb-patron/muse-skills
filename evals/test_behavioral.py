@@ -90,6 +90,285 @@ class BehavioralProviderTests(unittest.TestCase):
                     self.repo, "candidate", "example", "risk-first", "0" * 64
                 )
 
+    def test_delivers_exact_evidence_claims_v3_candidate(self):
+        relative = muse_provider.CANDIDATE_PATHS["evidence-claims-v3"]
+        source = experiment.ROOT / relative
+        (self.repo / relative).parent.mkdir(parents=True)
+        shutil.copyfile(source, self.repo / relative)
+        destination = Path(self.temp.name) / "v3"
+        muse_provider._prepare_workspace(
+            self.repo, destination, self.base, self.head, "candidate", "example", "evidence-claims-v3"
+        )
+        delivered = (destination / ".agents/skills/example/SKILL.md").read_bytes()
+        self.assertEqual(delivered, source.read_bytes())
+        self.assertEqual(hashlib.sha256(delivered).hexdigest(), experiment.EVIDENCE_CLAIMS_V3_SHA256)
+        identity = muse_provider._candidate_identity(
+            experiment.ROOT, "candidate", "example", "evidence-claims-v3",
+            experiment.EVIDENCE_CLAIMS_V3_SHA256,
+        )
+        self.assertEqual(
+            (identity["candidateId"], identity["candidateSha256"]),
+            ("evidence-claims-v3", experiment.EVIDENCE_CLAIMS_V3_SHA256),
+        )
+        with self.assertRaises(muse_provider.ProviderError):
+            muse_provider._candidate_identity(
+                experiment.ROOT, "candidate", "example", "evidence-claims-v3",
+                experiment.SCREEN_V3_MANIFEST_SHA256,
+            )
+
+    def _call_screen_provider(
+        self, trace_for_workspace, source_repository="gen-v-research-tools",
+        workspace_parent=False, run=None,
+    ):
+        relative = muse_provider.CANDIDATE_PATHS["evidence-claims-v3"]
+        outside = Path(self.temp.name) / "outside"
+        outside.mkdir(exist_ok=True)
+        self.trace_dir = Path(self.temp.name) / f"traces-{len(list(Path(self.temp.name).glob('traces-*')))}"
+        self.trace_dir.mkdir()
+        (self.repo / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(experiment.ROOT / relative, self.repo / relative)
+        seen = {}
+
+        def fake_run(args, workspace, timeout_seconds, env):
+            seen["workspace"] = workspace
+            seen["args"] = args
+            events = [
+                {"payload_type": "run.started", "payload": {"model": "muse-spark-1.3-contributor"}},
+                {"payload_type": "agent.skill_read.observed", "payload": {"skill_id": "example"}},
+                *trace_for_workspace(workspace),
+                {"payload_type": "run.terminal.completed", "payload": {"text": '{"verdict": "APPROVE"}'}},
+            ]
+            return subprocess.CompletedProcess(args, 0, "\n".join(json.dumps(e) for e in events), "")
+
+        config_extra = {"workspace_parent": str(outside)} if workspace_parent else {}
+        with mock.patch.object(muse_provider, "_prepare_workspace", return_value=(self.base, self.head)), \
+                mock.patch.dict(os.environ, {"MUSE_EVAL_TRACE_DIR": str(self.trace_dir)}):
+            with mock.patch.object(muse_provider.shutil, "which", return_value="/usr/bin/muse"):
+                with mock.patch.object(muse_provider, "_run_muse", side_effect=run or fake_run):
+                    response = muse_provider.call_api(
+                        "review now",
+                        {
+                            "config": {
+                                "variant": "candidate",
+                                "candidate_id": "evidence-claims-v3",
+                                "candidate_sha256": experiment.EVIDENCE_CLAIMS_V3_SHA256,
+                                "model": "muse-spark-1.3-contributor",
+                                "max_model_steps": 24,
+                                "timeout_seconds": 540,
+                                "repo_root": str(self.repo),
+                                **config_extra,
+                            }
+                        },
+                        {"vars": {
+                            "base_sha": self.base, "head_sha": self.head, "skill_name": "example",
+                            "source_repository": source_repository,
+                        }, "test": {"metadata": {"case_id": "genv-pr90-evidence-claim"}}},
+                    )
+        return response, seen
+
+    def test_screen_provider_records_v3_identity_and_allows_checkout_paths(self):
+        response, seen = self._call_screen_provider(
+            lambda workspace: [
+                {"payload_type": "tool.call", "payload": {"text": f"cat {workspace}/research/note.md"}},
+                {"payload_type": "session.root", "payload": {"text": str(self.repo.resolve())}},
+            ]
+        )
+        self.assertNotIn("error", response)
+        self.assertEqual(response["metadata"]["candidateId"], "evidence-claims-v3")
+        self.assertEqual(response["metadata"]["candidateSha256"], experiment.EVIDENCE_CLAIMS_V3_SHA256)
+        self.assertTrue(response["metadata"]["skillObserved"])
+        self.assertEqual(response["metadata"]["museModels"], ["muse-spark-1.3-contributor"])
+        self.assertIn("--max-model-steps", seen["args"])
+        self.assertEqual(seen["args"][seen["args"].index("--max-model-steps") + 1], "24")
+        self.assertNotIn("gold", seen["args"][-1])
+
+    def test_screen_provider_quarantines_rows_that_reach_grader_only_material(self):
+        for label, trace, flag in (
+            ("eval repo path", lambda w: [{"payload_type": "tool.call", "payload": {
+                "text": f"cat {self.repo.resolve()}/evals/behavioral/cases/x.yaml"}}], "eval-repository-path"),
+            ("relative case pack", lambda w: [{"payload_type": "tool.call", "payload": {
+                "text": "cat ../../evals/behavioral/cases/development-v3-cases.yaml"}}], "development-v3-cases"),
+            ("gold field", lambda w: [{"payload_type": "tool.result", "payload": {
+                "text": "gold_findings: |"}}], "gold_findings"),
+            ("diagnosis report", lambda w: [{"payload_type": "tool.call", "payload": {
+                "text": "ls reports/2026-09-15-evidence-claims-v2-miss-diagnosis.md"}}], "miss-diagnosis"),
+            ("answer-key snapshot", lambda w: [{"payload_type": "tool.call", "payload": {
+                "text": "cat answer-keys/evidence-claims-v3-screen-v1.yaml"}}], "evidence-claims-v3-screen"),
+            ("sibling of checkout", lambda w: [{"payload_type": "tool.call", "payload": {
+                "text": f"ls {w.parent.parent}/other-run"}}], "workspace-parent-path"),
+        ):
+            with self.subTest(label=label):
+                response, _ = self._call_screen_provider(trace, workspace_parent=True)
+                self.assertNotIn("error", response)
+                self.assertIn(flag, response["metadata"]["graderBoundaryFlags"])
+                verdict = review_contract.assert_answer_key_boundary(
+                    response["output"], {"metadata": response["metadata"]}
+                )
+                self.assertFalse(verdict["pass"])
+                self.assertIn("QUARANTINE", verdict["reason"])
+
+    def test_screen_provider_retains_private_traces_and_uses_outside_workspace(self):
+        response, seen = self._call_screen_provider(
+            lambda w: [{"payload_type": "tool.call", "payload": {"text": f"cat {w}/a.txt"}}],
+            workspace_parent=True,
+        )
+        metadata = response["metadata"]
+        self.assertTrue(metadata["workspaceOutsideEvalRepo"])
+        self.assertNotIn(str(self.repo.resolve()), str(seen["workspace"]))
+        self.assertEqual(metadata["graderBoundaryFlags"], [])
+        self.assertTrue(
+            review_contract.assert_answer_key_boundary("", {"metadata": metadata})["pass"]
+        )
+        self.assertEqual(metadata["traceStatus"], "retained")
+        stored = Path(self.trace_dir) / metadata["traceStdoutFile"]
+        self.assertEqual(stat.S_IMODE(stored.stat().st_mode), 0o600)
+        self.assertEqual(hashlib.sha256(stored.read_bytes()).hexdigest(), metadata["traceStdoutSha256"])
+        self.assertIn("run.terminal.completed", stored.read_text(encoding="utf-8"))
+        # Without an outside workspace the boundary assertion fails closed.
+        response, _ = self._call_screen_provider(lambda w: [])
+        self.assertFalse(
+            review_contract.assert_answer_key_boundary("", {"metadata": response["metadata"]})["pass"]
+        )
+
+    def test_screen_provider_keeps_timeout_trace_and_checks_it(self):
+        def timeout(args, workspace, timeout_seconds, env):
+            raise subprocess.TimeoutExpired(
+                args, timeout_seconds,
+                output=json.dumps({"payload_type": "tool.result", "payload": {"text": "gold_findings"}}),
+                stderr="late",
+            )
+        response, _ = self._call_screen_provider(lambda w: [], workspace_parent=True, run=timeout)
+        self.assertIn("timed out", response["error"])
+        self.assertEqual(response["metadata"]["termination"], "timeout")
+        self.assertEqual(response["metadata"]["graderBoundaryFlags"], ["gold_findings"])
+        self.assertEqual(response["metadata"]["traceStatus"], "retained")
+
+    def test_command_scan_matches_real_muse_tool_result_shape(self):
+        # Mirrors a real `muse exec --json` probe: commands arrive as JSON text in
+        # tool.result and task.lifecycle.output events.
+        def chunk(command):
+            return json.dumps({"chunk_id": "exec-1-1", "command": command, "exit_code": 0,
+                               "terminal_status": "completed", "output": "x\n"}, indent=2)
+
+        def trace(w):
+            return [
+                {"payload_type": "tool.result", "payload": {"kind": "tool_result", "text": chunk("cat README.md")}},
+                {"payload_type": "task.lifecycle.output",
+                 "payload": {"event": {"kind": "output", "chunk": chunk("cat ../notes.txt")}}},
+                {"payload_type": "tool.result",
+                 "payload": {"text": chunk("ls /Users/someone/Documents/Developer")}},
+            ]
+
+        response, _ = self._call_screen_provider(trace, workspace_parent=True)
+        self.assertEqual(
+            response["metadata"]["graderBoundaryFlags"],
+            ["command-absolute-path", "command-traversal"],
+        )
+
+    def test_command_scan_flags_escapes_but_not_ordinary_review_commands(self):
+        workspace = Path("/x/.muse-skill-eval-ab/repo")
+        ordinary = [
+            "git diff c90e9aa..3ecd941 --stat", "git log --oneline base..head",
+            "git show HEAD~1:README.md", "PYTHONPATH=src python3 -m unittest tests.test_q1",
+            "cd src && ls", "grep -rn every research/ 2>/dev/null",
+            f"cat {workspace}/research/note.md", "/usr/bin/env python3 x.py", "cat a.json | jq .",
+        ]
+        escapes = {
+            "cat ../notes.txt": "command-traversal",
+            "cat /Users/u/Documents/x": "command-absolute-path",
+            "cat /private/tmp/x": "command-absolute-path",
+            "ls ~": "command-home-reference",
+            "cat $HOME/.config": "command-home-reference",
+            "cd": "command-directory-change",
+            "cd ..": "command-directory-change",
+            "git -C other log": "command-indirect-access",
+            "git --git-dir=.git log": "command-indirect-access",
+            "cat .git/objects/info/alternates": "command-indirect-access",
+            "python3 -c 'import os; print(os.environ)'": "command-indirect-access",
+        }
+        for command in ordinary:
+            with self.subTest(command=command):
+                self.assertEqual(muse_provider._command_flags(command, workspace), set())
+        for command, flag in escapes.items():
+            with self.subTest(command=command):
+                self.assertIn(flag, muse_provider._command_flags(command, workspace))
+        for tool in ("/opt/homebrew/bin/rg -n x src", "/usr/local/bin/jq . a.json"):
+            self.assertEqual(muse_provider._command_flags(tool, workspace), set())
+        # Truncated, prefixed or fenced JSON still yields its commands.
+        for text in (
+            '{\n  "chunk_id": "exec-1-1",\n  "command": "cat ../x",\n  "output": "trunc',
+            'Exit 0\n{"command": "cat ../x"}',
+            '```json\n{"checks": [{"command": "cat ../x"}]}\n```',
+        ):
+            with self.subTest(text=text[:20]):
+                stream = json.dumps({"payload_type": "tool.result", "payload": {"text": text}})
+                self.assertIn("cat ../x", muse_provider._command_texts(stream))
+        # Commands the review itself reports are scanned too.
+        review = json.dumps({"checks": [{"command": "cat ../../x", "exit_code": 0}]})
+        stream = json.dumps({"payload_type": "run.terminal.completed", "payload": {"text": review}})
+        self.assertIn("cat ../../x", muse_provider._command_texts(stream))
+
+    def test_trace_write_failure_keeps_the_finished_review(self):
+        def read_only_traces(w):
+            self.trace_dir.chmod(0o500)
+            self.addCleanup(self.trace_dir.chmod, 0o700)
+            return []
+
+        response, _ = self._call_screen_provider(read_only_traces, workspace_parent=True)
+        self.assertNotIn("error", response)
+        self.assertEqual(response["metadata"]["traceStatus"], "failed")
+        self.assertIn("PermissionError", response["metadata"]["traceError"])
+        self.assertRegex(response["metadata"]["traceStdoutSha256"], r"^[0-9a-f]{64}$")
+        self.assertIn("verdict", response["output"])
+        # Without its complete trace the row cannot be audited, so it is quarantined.
+        self.assertFalse(
+            review_contract.assert_answer_key_boundary("", {"metadata": response["metadata"]})["pass"]
+        )
+
+    def test_review_env_hides_eval_harness_paths_and_names(self):
+        root = self.repo.resolve()
+        fake = {
+            "PATH": os.pathsep.join([f"{root}/node_modules/.bin", "/usr/bin", str(root)]),
+            "MUSE_EVAL_TRACE_DIR": f"{root}/evals/behavioral/results/x.traces",
+            "MUSE_EVAL_WORKSPACE_PARENT": "/outside",
+            "npm_lifecycle_event": "eval:evidence-claims-v3-screen",
+            "INIT_CWD": str(root), "PWD": str(root), "SPIKE_PYTHON": f"{root}/.venv/bin/python",
+            "PROMPTFOO_CONFIG_DIR": f"{root}/evals/behavioral/results/x.promptfoo",
+            "VIRTUAL_ENV": f"{root}/.venv", "HOME": "/home/user",
+        }
+        with mock.patch.dict(os.environ, fake, clear=True):
+            env = muse_provider._review_env(root)
+        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertEqual(env["HOME"], "/home/user")
+        flat = "\n".join(f"{k}={v}" for k, v in env.items())
+        self.assertNotIn(str(root), flat)
+        for marker in muse_provider.GRADER_ONLY_MARKERS:
+            self.assertNotIn(marker, flat)
+
+    def test_workspace_parent_from_runner_environment(self):
+        outside = Path(self.temp.name) / "from-env"
+        outside.mkdir()
+        with mock.patch.dict(os.environ, {"MUSE_EVAL_WORKSPACE_PARENT": str(outside)}):
+            self.assertEqual(muse_provider._workspace_parent({}, self.repo.resolve()), outside.resolve())
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(muse_provider._workspace_parent({}, self.repo.resolve()), self.repo.resolve())
+
+    def test_workspace_parent_must_be_outside_eval_repo(self):
+        inside = self.repo / "nested"
+        inside.mkdir()
+        for bad in (self.repo, inside, self.repo.parent):
+            with self.subTest(parent=bad):
+                with self.assertRaises(muse_provider.ProviderError):
+                    muse_provider._workspace_parent({"workspace_parent": str(bad)}, self.repo.resolve())
+
+    def test_grader_boundary_check_skips_muse_skills_history(self):
+        # Historical muse-skills heads legitimately contain these field names.
+        response, _ = self._call_screen_provider(
+            lambda w: [{"payload_type": "tool.result", "payload": {"text": "gold_findings: |"}}],
+            source_repository="muse-skills",
+        )
+        self.assertNotIn("error", response)
+
     def test_rejects_non_sha_and_non_ancestor(self):
         with self.assertRaises(muse_provider.ProviderError):
             muse_provider._resolve_commit(self.repo, "HEAD; echo unsafe")
@@ -456,6 +735,119 @@ class SpikeValidationTests(unittest.TestCase):
             sum(case["vars"]["gold_findings"] == "NONE" for case in cases), 1
         )
 
+    def test_versioned_development_v3_calibration(self):
+        self.assertEqual(experiment.validate_development_v3_manifest(), [])
+        self.assertEqual(experiment.validate_development_v3_cases(), [])
+        self.assertEqual(experiment.validate_development_v3_config(), [])
+        cases = experiment._load(experiment.DEVELOPMENT_V3_CASES)
+        control = next(
+            case for case in cases
+            if case["metadata"]["case_id"] == "genv-pr90-synchronized-clean"
+        )
+        self.assertEqual(control["vars"]["expected_verdict"], "APPROVE")
+        self.assertIn("(low)", control["vars"]["gold_findings"])
+        self.assertNotIn(
+            "tracked finalization metadata are synchronized",
+            control["vars"]["resolved_findings"],
+        )
+
+    def test_evidence_claims_v3_screen_configuration(self):
+        self.assertEqual(experiment.validate_screen_v3_manifest(), [])
+        self.assertEqual(experiment.validate_screen_v3_config(), [])
+        config = experiment._load(experiment.SCREEN_V3_CONFIG)
+        profile = experiment._load(experiment.DEVELOPMENT_V3_CONFIG)
+        self.assertEqual(config["tests"], profile["tests"])
+        self.assertEqual(config["evaluateOptions"], profile["evaluateOptions"])
+        # Review-only: the profile's deterministic checks plus quarantine, no LLM grader.
+        self.assertEqual(config["defaultTest"]["options"], {"disableVarExpansion": True})
+        python_checks = [a for a in profile["defaultTest"]["assert"] if a["type"] == "python"]
+        self.assertEqual(config["defaultTest"]["assert"][:-1], python_checks)
+        self.assertEqual(config["defaultTest"]["assert"][-1]["metric"], "answer_key_boundary")
+        self.assertFalse(any(a["type"] == "llm-rubric" for a in config["defaultTest"]["assert"]))
+        keys = experiment._load(experiment.SCREEN_V3_ANSWER_KEYS)
+        severity = keys["cases"]["genv-pr87-first-repair-type-boundary"]["findings"][0]["severity"]
+        self.assertEqual(severity, "should-fix")
+        self.assertEqual(
+            [(p["label"], p["config"]["candidate_id"]) for p in config["providers"]],
+            [("screen-evidence-claims-v2", "evidence-claims-v2"),
+             ("screen-evidence-claims-v3", "evidence-claims-v3")],
+        )
+        baseline = {k: v for k, v in profile["providers"][1]["config"].items()}
+        for provider in config["providers"]:
+            shared = {k: v for k, v in provider["config"].items() if k not in {"candidate_id", "candidate_sha256"}}
+            self.assertEqual(shared, {k: v for k, v in baseline.items() if k not in {"candidate_id", "candidate_sha256"}})
+
+    def test_evidence_claims_v3_screen_rejects_candidate_and_profile_drift(self):
+        config = experiment._load(experiment.SCREEN_V3_CONFIG)
+        manifest = experiment._load(experiment.SCREEN_V3_MANIFEST)
+        mutations = {
+            "v3 replaced by v2": lambda c: c["providers"][1]["config"].update(
+                candidate_id="evidence-claims-v2",
+                candidate_sha256=manifest["candidates"][0]["sha256"],
+            ),
+            "step budget raised": lambda c: c["providers"][1]["config"].update(max_model_steps=48),
+            "wall clock raised": lambda c: c["providers"][0]["config"].update(timeout_seconds=900),
+            "copied case pack": lambda c: c.update(tests="file://cases/screen-cases.yaml"),
+            "third provider": lambda c: c["providers"].append(copy.deepcopy(c["providers"][0])),
+            "gold exposed to candidate": lambda c: c.update(prompts=["file://prompts/gold.txt"]),
+            "llm grader added": lambda c: c["defaultTest"]["options"].update(
+                provider={"id": "anthropic:claude-agent-sdk"}
+            ),
+            "quarantine removed": lambda c: c["defaultTest"]["assert"].pop(),
+            "rubric added": lambda c: c["defaultTest"]["assert"].append(
+                {"type": "llm-rubric", "metric": "gold_recall", "threshold": 0.75, "value": "{{gold_findings}}"}
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                changed = copy.deepcopy(config)
+                mutate(changed)
+                with mock.patch.object(experiment, "_load", side_effect=[changed, manifest]):
+                    self.assertNotEqual(experiment.validate_screen_v3_config(), [])
+        profile = experiment._load(experiment.DEVELOPMENT_V3_MANIFEST)
+        keys = experiment._load(experiment.SCREEN_V3_ANSWER_KEYS)
+        cases = experiment._load(experiment.DEVELOPMENT_V3_CASES)
+        for label, mutate in {
+            "v3 hash edited": lambda m, k: m["candidates"][1].update(sha256="0" * 64),
+            "baseline swapped": lambda m, k: m["candidates"].reverse(),
+            "runtime changed": lambda m, k: m["tested_runtime"].update(model="other"),
+            "llm grader declared": lambda m, k: m.update(grader={"model": "gpt-5.6-terra"}),
+            "answer-key verdict drift": lambda m, k: k["cases"]["genv-pr90-synchronized-clean"].update(
+                expected_verdict="NEEDS_FIXES"
+            ),
+        }.items():
+            with self.subTest(label=label):
+                changed, changed_keys = copy.deepcopy(manifest), copy.deepcopy(keys)
+                mutate(changed, changed_keys)
+                with mock.patch.object(
+                    experiment, "_load", side_effect=[changed, profile, changed_keys, cases]
+                ):
+                    self.assertNotEqual(experiment.validate_screen_v3_manifest(), [])
+
+    def test_development_v3_rejects_truth_and_rubric_regressions(self):
+        cases = experiment._load(experiment.DEVELOPMENT_V3_CASES)
+        bad_cases = copy.deepcopy(cases)
+        control = next(
+            case for case in bad_cases
+            if case["metadata"]["case_id"] == "genv-pr90-synchronized-clean"
+        )
+        control["vars"]["gold_findings"] = "NONE"
+        with mock.patch.object(experiment, "_load", side_effect=[bad_cases, experiment._load(experiment.DEVELOPMENT_CASES)]):
+            self.assertNotEqual(experiment.validate_development_v3_cases(), [])
+
+        config = experiment._load(experiment.DEVELOPMENT_V3_CONFIG)
+        manifest = experiment._load(experiment.DEVELOPMENT_V3_MANIFEST)
+        for label, metric, replacement in (
+            ("gold recall follows candidate severity", "gold_recall", "Score only matching severities. {{gold_findings}}"),
+            ("blocking recall follows candidate severity", "blocking_recall", "No blocking label means no recall. {{gold_findings}}"),
+        ):
+            with self.subTest(label=label):
+                changed = copy.deepcopy(config)
+                item = next(value for value in changed["defaultTest"]["assert"] if value["metric"] == metric)
+                item["value"] = replacement
+                with mock.patch.object(experiment, "_load", side_effect=[changed, manifest]):
+                    self.assertNotEqual(experiment.validate_development_v3_config(), [])
+
     def test_development_config_rejects_gold_prompt_and_profile_weakening(self):
         canonical = experiment._load(experiment.DEVELOPMENT_CONFIG)
         manifest = experiment._load(experiment.DEVELOPMENT_MANIFEST)
@@ -508,6 +900,62 @@ class SpikeValidationTests(unittest.TestCase):
         self.assertIsNone(scored["blocking_finding_recall"])
         self.assertIsNone(scored["all_gold_recall"])
         self.assertIsNone(scored["verdict_accuracy"])
+
+    def test_review_only_normalization_completes_and_quarantines(self):
+        base_scores = {name: 1 for name in scoring.DETERMINISTIC_NAMED_SCORES}
+
+        def row(case_id, label, verdict, expected, flags=(), boundary=1):
+            return {
+                "provider": {"label": label},
+                "metadata": {"case_id": case_id, "split": "development"},
+                "vars": {"expected_verdict": expected, "gold_findings": "1. x (should-fix): y"},
+                "namedScores": {**base_scores, "answer_key_boundary": boundary},
+                "response": {
+                    "output": json.dumps({"verdict": verdict}),
+                    "metadata": {"candidateId": label, "graderBoundaryFlags": list(flags)},
+                },
+            }
+
+        rows = [
+            row("a", "v2", "NEEDS_FIXES", "NEEDS_FIXES"),
+            row("b", "v2", "APPROVE", "NEEDS_FIXES"),
+            row("c", "v2", "APPROVE", "APPROVE"),
+            row("a", "v3", "NEEDS_FIXES", "NEEDS_FIXES"),
+            row("b", "v3", "APPROVE", "NEEDS_FIXES", flags=["gold_findings"], boundary=0),
+            row("c", "v3", "APPROVE", "APPROVE"),
+        ]
+        payload = {"results": {"results": rows}}
+        rubric = scoring.normalize(payload)
+        self.assertEqual(rubric["aggregate"]["completed"], 0)
+        result = scoring.normalize(payload, "deterministic")
+        aggregate = result["aggregate"]
+        self.assertEqual((aggregate["rows"], aggregate["completed"], aggregate["errors"]), (6, 6, 0))
+        self.assertEqual(aggregate["quarantined"], 1)
+        # The quarantined false approval is counted but kept out of quality totals.
+        self.assertEqual(aggregate["false_approvals"], 1)
+        self.assertAlmostEqual(aggregate["verdict_accuracy"], 4 / 5)
+        self.assertIsNone(aggregate["all_gold_recall"])
+        self.assertTrue(result["rows"][4]["quarantined"])
+        self.assertEqual(result["rows"][4]["grader_boundary_flags"], ["gold_findings"])
+        self.assertEqual(result["normalization"]["grading"], "deterministic")
+        # An error row whose trace hit a marker is still reported as quarantined.
+        errored = row("a", "v3", "", "NEEDS_FIXES", flags=["gold_findings"])
+        errored["response"] = {"error": "Muse timed out", "output": "",
+                               "metadata": {"graderBoundaryFlags": ["gold_findings"]}}
+        scored = scoring.normalize({"results": {"results": [errored]}}, "deterministic")
+        self.assertEqual(scored["aggregate"]["errors"], 1)
+        self.assertEqual(scored["aggregate"]["quarantined"], 1)
+        # A completed review whose trace was not kept is unevaluable.
+        untraced = row("a", "v3", "NEEDS_FIXES", "NEEDS_FIXES")
+        untraced["response"]["metadata"]["traceStatus"] = "failed"
+        scored = scoring.normalize({"results": {"results": [untraced]}}, "deterministic")
+        self.assertEqual(scored["aggregate"]["quarantined"], 1)
+        self.assertIsNone(scored["aggregate"]["verdict_accuracy"])
+        # Older rubric stages never promised traces, so their metrics are unchanged.
+        untraced["response"]["metadata"]["traceStatus"] = "not-retained"
+        untraced["namedScores"].pop("answer_key_boundary")
+        rubric_scored = scoring.promptfoo_rows({"results": {"results": [untraced]}})
+        self.assertFalse(rubric_scored[0]["quarantined"])
 
     def test_empty_gold_recall_is_not_applicable_but_verdict_still_scores(self):
         scored = scoring.score_row(
@@ -673,6 +1121,37 @@ class SpikeValidationTests(unittest.TestCase):
         normalized = scoring.normalize({"results": {"results": [defect]}})
         self.assertEqual(normalized["normalization"]["id"], "muse-review-metrics-v2")
         self.assertEqual(normalized["aggregate"]["all_gold_recall_scored_rows"], 1)
+
+    def test_calibrated_recall_is_separate_from_candidate_severity_label(self):
+        common = {
+            "provider": {"label": "development-v3-evidence-claims"},
+            "metadata": {"case_id": "calibration", "split": "development"},
+            "vars": {
+                "expected_verdict": "NEEDS_FIXES",
+                "gold_findings": "1. exact-boundary (blocking): accepts a type alias",
+            },
+            "response": {"metadata": {"candidateId": "evidence-claims-v2"}},
+        }
+        detected = copy.deepcopy(common)
+        detected["namedScores"] = {
+            metric: 1 for metric in scoring.REQUIRED_NAMED_SCORES
+        }
+        detected["response"]["output"] = (
+            '{"verdict":"NEEDS_FIXES","findings":'
+            '[{"severity":"should-fix","title":"exact boundary accepts a type alias"}]}'
+        )
+        missed = copy.deepcopy(common)
+        missed["namedScores"] = {
+            metric: 1 for metric in scoring.REQUIRED_NAMED_SCORES
+        }
+        missed["namedScores"].update({"gold_recall": 0, "blocking_recall": 0})
+        missed["response"]["output"] = '{"verdict":"APPROVE","findings":[]}'
+
+        rows = scoring.normalize({"results": {"results": [detected, missed]}})["rows"]
+        self.assertEqual(rows[0]["all_gold_recall"], 1)
+        self.assertEqual(rows[0]["blocking_finding_recall"], 1)
+        self.assertEqual(rows[1]["all_gold_recall"], 0)
+        self.assertEqual(rows[1]["blocking_finding_recall"], 0)
 
     def test_explicit_unknown_gold_cannot_fall_back_to_provider_facts(self):
         common = {
@@ -863,40 +1342,56 @@ class SpikeValidationTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(development.returncode, 2)
+        development_v3 = subprocess.run(
+            [
+                "node",
+                "evals/behavioral/run.mjs",
+                "development-v3-validate",
+                "--grader",
+                "override",
+            ],
+            cwd=experiment.ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(development_v3.returncode, 2)
 
     def test_development_runner_refuses_to_overwrite_raw_metrics_or_reservation(self):
-        output = experiment.ROOT / "evals/behavioral/results/development-v2.json"
-        artifacts = [
-            output,
-            Path(f"{output}.metrics-v2.json"),
-            Path(f"{output}.reservation.json"),
-            Path(f"{output}.promptfoo"),
-        ]
-        output.parent.mkdir(parents=True, exist_ok=True)
-        for artifact in artifacts:
-            with self.subTest(artifact=artifact.name):
-                self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
-                if artifact.suffix == ".promptfoo":
-                    artifact.mkdir()
-                else:
-                    artifact.write_text("preserve me\n", encoding="utf-8")
-                try:
-                    result = subprocess.run(
-                        ["node", "evals/behavioral/run.mjs", "development-v2"],
-                        cwd=experiment.ROOT,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    self.assertEqual(result.returncode, 2)
-                    self.assertIn("refuses to overwrite", result.stderr)
-                    if artifact.is_file():
-                        self.assertEqual(artifact.read_text(encoding="utf-8"), "preserve me\n")
-                finally:
-                    if artifact.is_dir():
-                        artifact.rmdir()
+        for mode in ("development-v2", "development-v3", "evidence-claims-v3-screen"):
+            output = experiment.ROOT / f"evals/behavioral/results/{mode}.json"
+            artifacts = [
+                output,
+                Path(f"{output}.metrics-v2.json"),
+                Path(f"{output}.reservation.json"),
+                Path(f"{output}.promptfoo"),
+                Path(f"{output}.traces"),
+            ]
+            output.parent.mkdir(parents=True, exist_ok=True)
+            for artifact in artifacts:
+                with self.subTest(mode=mode, artifact=artifact.name):
+                    self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
+                    if artifact.suffix in {".promptfoo", ".traces"}:
+                        artifact.mkdir()
                     else:
-                        artifact.unlink(missing_ok=True)
+                        artifact.write_text("preserve me\n", encoding="utf-8")
+                    try:
+                        result = subprocess.run(
+                            ["node", "evals/behavioral/run.mjs", mode],
+                            cwd=experiment.ROOT,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        self.assertEqual(result.returncode, 2)
+                        self.assertIn("refuses to overwrite", result.stderr)
+                        if artifact.is_file():
+                            self.assertEqual(artifact.read_text(encoding="utf-8"), "preserve me\n")
+                    finally:
+                        if artifact.is_dir():
+                            artifact.rmdir()
+                        else:
+                            artifact.unlink(missing_ok=True)
 
     def test_development_runner_applies_private_creation_policy(self):
         output = experiment.ROOT / "evals/behavioral/results/development-v2.json"
@@ -937,6 +1432,109 @@ class SpikeValidationTests(unittest.TestCase):
                 metrics.unlink(missing_ok=True)
                 reservation.unlink(missing_ok=True)
                 shutil.rmtree(cache, ignore_errors=True)
+                shutil.rmtree(Path(f"{output}.traces"), ignore_errors=True)
+
+    def test_screen_runner_sets_private_traces_and_outside_workspaces(self):
+        output = experiment.ROOT / "evals/behavioral/results/evidence-claims-v3-screen.json"
+        artifacts = [output, *(Path(f"{output}{suffix}") for suffix in (
+            ".metrics-v2.json", ".reservation.json", ".promptfoo", ".traces"))]
+        for artifact in artifacts:
+            self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
+        with tempfile.TemporaryDirectory() as temp:
+            fake_bin = Path(temp) / "bin"
+            fake_bin.mkdir()
+            seen = Path(temp) / "seen"
+            promptfoo = fake_bin / "promptfoo"
+            promptfoo.write_text(
+                '#!/bin/sh\nprintf "%s\\n%s\\n%s\\n" "$MUSE_EVAL_TRACE_DIR" '
+                '"$MUSE_EVAL_WORKSPACE_PARENT" "$*" > "$FAKE_SEEN"\nexit 1\n',
+                encoding="utf-8",
+            )
+            promptfoo.chmod(0o700)
+            try:
+                result = subprocess.run(
+                    ["node", "evals/behavioral/run.mjs", "evidence-claims-v3-screen"],
+                    cwd=experiment.ROOT, capture_output=True, text=True, check=False,
+                    env={
+                        **os.environ,
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                        "SPIKE_PYTHON": sys.executable,
+                        "FAKE_SEEN": str(seen),
+                        "MUSE_EVAL_WORKSPACE_BASE": str(Path(temp) / "outside"),
+                    },
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                traces, parent, args = seen.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(Path(traces), Path(f"{output}.traces"))
+                self.assertEqual(stat.S_IMODE(Path(traces).stat().st_mode), 0o700)
+                self.assertTrue(parent.startswith(str(Path(temp) / "outside")))
+                self.assertNotIn(str(experiment.ROOT), parent)
+                for marker in muse_provider.GRADER_ONLY_MARKERS:
+                    self.assertNotIn(marker, parent)
+                self.assertEqual(stat.S_IMODE(Path(parent).stat().st_mode), 0o700)
+                self.assertIn("--no-cache --repeat 1", args)
+                self.assertIn("evidence-claims-v3-screen-promptfooconfig.yaml", args)
+            finally:
+                for artifact in artifacts:
+                    if artifact.is_dir():
+                        shutil.rmtree(artifact, ignore_errors=True)
+                    else:
+                        artifact.unlink(missing_ok=True)
+
+
+    def test_screen_runner_accepts_a_complete_review_only_run(self):
+        output = experiment.ROOT / "evals/behavioral/results/evidence-claims-v3-screen.json"
+        artifacts = [output, *(Path(f"{output}{suffix}") for suffix in (
+            ".metrics-v2.json", ".reservation.json", ".promptfoo", ".traces"))]
+        for artifact in artifacts:
+            self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
+        rows = []
+        for label in ("screen-evidence-claims-v2", "screen-evidence-claims-v3"):
+            for case in experiment._load(experiment.DEVELOPMENT_V3_CASES):
+                verdict = case["vars"]["expected_verdict"]
+                rows.append({
+                    "provider": {"label": label},
+                    "metadata": dict(case["metadata"]),
+                    "vars": dict(case["vars"]),
+                    "namedScores": {name: 1 for name in scoring.DETERMINISTIC_NAMED_SCORES},
+                    "response": {"output": json.dumps({"verdict": verdict}),
+                                 "metadata": {"graderBoundaryFlags": []}},
+                })
+        with tempfile.TemporaryDirectory() as temp:
+            canned = Path(temp) / "canned.json"
+            canned.write_text(json.dumps({"results": {"results": rows}}), encoding="utf-8")
+            fake_bin = Path(temp) / "bin"
+            fake_bin.mkdir()
+            promptfoo = fake_bin / "promptfoo"
+            promptfoo.write_text(
+                '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\n'
+                'cp "$FAKE_CANNED" "$out"\nexit 100\n',
+                encoding="utf-8",
+            )
+            promptfoo.chmod(0o700)
+            try:
+                result = subprocess.run(
+                    ["node", "evals/behavioral/run.mjs", "evidence-claims-v3-screen"],
+                    cwd=experiment.ROOT, capture_output=True, text=True, check=False,
+                    env={
+                        **os.environ,
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                        "SPIKE_PYTHON": sys.executable,
+                        "FAKE_CANNED": str(canned),
+                        "MUSE_EVAL_WORKSPACE_BASE": str(Path(temp) / "outside"),
+                    },
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("verified 6 rows", result.stdout)
+                metrics = json.loads(Path(f"{output}.metrics-v2.json").read_text(encoding="utf-8"))
+                self.assertEqual(metrics["aggregate"]["completed"], 6)
+                self.assertEqual(metrics["aggregate"]["verdict_accuracy"], 1)
+            finally:
+                for artifact in artifacts:
+                    if artifact.is_dir():
+                        shutil.rmtree(artifact, ignore_errors=True)
+                    else:
+                        artifact.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
