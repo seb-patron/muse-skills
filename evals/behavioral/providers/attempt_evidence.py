@@ -169,6 +169,33 @@ def locate_session_dir(
     return resolved
 
 
+def session_dir_is_ambiguous(sessions_root: str | Path, session_id: str | None) -> bool:
+    """Report whether several session directories match one session id.
+
+    ``locate_session_dir`` returns None for both a missing and an ambiguous
+    record; the provider uses this to record ``session-record-ambiguous``
+    (two matching dirs) instead of ``session-record-missing``.
+    """
+
+    if not isinstance(session_id, str) or not SESSION_ID_RE.match(session_id):
+        return False
+    root = Path(sessions_root).expanduser()
+    try:
+        matches = [p for p in root.glob(f"*/*/*/{session_id}") if p.is_dir()]
+    except OSError:
+        return False
+    return len(matches) > 1
+
+
+def _record_walk_error(
+    gaps: list[str], skipped: list[dict[str, Any]], rel: str, error_name: str
+) -> None:
+    gap = f"walk-error:{error_name}"
+    if gap not in gaps:
+        gaps.append(gap)
+    skipped.append({"path": rel, "reason": gap})
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -193,14 +220,21 @@ def _read_link_text(path: Path) -> str:
 
 def _reminder_child_log_paths(
     session_dir: Path, sessions_root: Path, records: list[dict[str, Any]]
-) -> dict[str, Path]:
-    """Map reminder child id to its log file when it exists inside the root."""
+) -> tuple[dict[str, Path], bool]:
+    """Map reminder child id to its log file when it exists inside the root.
+
+    Returns the id-to-log mapping plus whether any linked child id failed
+    the session-UUID validation (a ``../../../../escaped`` child id must
+    never reach a filesystem path; it is skipped and reported as
+    ``invalid-child-id`` by the caller).
+    """
 
     found: dict[str, Path] = {}
+    invalid = False
     try:
         root_resolved = sessions_root.resolve()
     except OSError:
-        return found
+        return found, invalid
     for item in records:
         event = _session_event(item)
         if not isinstance(event, Mapping) or event.get("kind") != "memory_reminder_child_session_linked":
@@ -208,6 +242,9 @@ def _reminder_child_log_paths(
         child_id = event.get("child_session_id")
         raw_path = event.get("child_session_log_path")
         if not isinstance(child_id, str) or not child_id:
+            continue
+        if not SESSION_ID_RE.match(child_id):
+            invalid = True
             continue
         if not isinstance(raw_path, str) or not raw_path:
             continue
@@ -222,7 +259,7 @@ def _reminder_child_log_paths(
             continue
         if resolved.is_file():
             found[child_id] = resolved
-    return found
+    return found, invalid
 
 
 def _session_event(record: Any) -> Any:
@@ -234,44 +271,135 @@ def _session_event(record: Any) -> Any:
     return payload.get("event")
 
 
-def _iter_session_files(session_dir: Path) -> list[tuple[Path, str]]:
-    """List retainable session files as (absolute path, relative dest path)."""
+def _iter_session_files(
+    session_dir: Path,
+) -> tuple[list[tuple[Path, str]], list[dict[str, Any]]]:
+    """List retainable session files as (absolute path, relative dest path).
+
+    Returns the planned copies plus a skipped entry for every symlink left
+    behind (with its link text, never followed), so the manifest names each
+    skipped link instead of silently dropping it.
+    """
 
     planned: list[tuple[Path, str]] = []
+    skipped: list[dict[str, Any]] = []
     main_log = session_dir / "session.jsonl"
-    if main_log.is_file() and not main_log.is_symlink():
+    if main_log.is_symlink():
+        skipped.append(
+            {
+                "path": "session/session.jsonl",
+                "type": "symlink",
+                "target": _read_link_text(main_log),
+            }
+        )
+    elif main_log.is_file():
         planned.append((main_log, "session/session.jsonl"))
     subagents = session_dir / "subagent"
-    if subagents.is_dir() and not subagents.is_symlink():
-        for child in sorted(subagents.iterdir(), key=lambda p: p.name):
-            if not child.is_dir() or child.is_symlink():
+    if subagents.is_symlink():
+        skipped.append(
+            {
+                "path": "session/subagent",
+                "type": "symlink",
+                "target": _read_link_text(subagents),
+            }
+        )
+    elif subagents.is_dir():
+        try:
+            children = sorted(subagents.iterdir(), key=lambda p: p.name)
+        except OSError as exc:
+            skipped.append(
+                {
+                    "path": "session/subagent",
+                    "reason": f"walk-error:{type(exc).__name__}",
+                }
+            )
+            children = []
+        for child in children:
+            if not SESSION_ID_RE.match(child.name):
+                # Only session UUIDs may become path segments; anything else
+                # (including traversal names) is skipped and reported.
+                skipped.append(
+                    {
+                        "path": f"session/subagent/{child.name}",
+                        "reason": "invalid-child-id",
+                    }
+                )
+                continue
+            if child.is_symlink():
+                skipped.append(
+                    {
+                        "path": f"session/subagent/{child.name}",
+                        "type": "symlink",
+                        "target": _read_link_text(child),
+                    }
+                )
+                continue
+            if not child.is_dir():
                 continue
             log = child / "session.jsonl"
-            if log.is_file() and not log.is_symlink():
+            if log.is_symlink():
+                skipped.append(
+                    {
+                        "path": f"session/subagent/{child.name}/session.jsonl",
+                        "type": "symlink",
+                        "target": _read_link_text(log),
+                    }
+                )
+            elif log.is_file():
                 planned.append((log, f"session/subagent/{child.name}/session.jsonl"))
     outputs = session_dir / "tool-outputs"
-    if outputs.is_dir() and not outputs.is_symlink():
-        stack = sorted(outputs.iterdir(), key=lambda p: p.name)
+    if outputs.is_symlink():
+        skipped.append(
+            {
+                "path": "session/tool-outputs",
+                "type": "symlink",
+                "target": _read_link_text(outputs),
+            }
+        )
+    elif outputs.is_dir():
+        try:
+            stack = sorted(outputs.iterdir(), key=lambda p: p.name)
+        except OSError as exc:
+            skipped.append(
+                {
+                    "path": "session/tool-outputs",
+                    "reason": f"walk-error:{type(exc).__name__}",
+                }
+            )
+            stack = []
         while stack:
             current = stack.pop(0)
             try:
                 rel = current.relative_to(outputs)
             except ValueError:
                 continue
+            dest_rel = f"session/tool-outputs/{rel.as_posix()}"
             if current.is_symlink():
+                skipped.append(
+                    {
+                        "path": dest_rel,
+                        "type": "symlink",
+                        "target": _read_link_text(current),
+                    }
+                )
                 continue
             if current.is_dir():
                 if rel.parts and rel.parts[0] == ".spool":
                     continue
-                stack.extend(sorted(current.iterdir(), key=lambda p: p.name))
+                try:
+                    stack.extend(sorted(current.iterdir(), key=lambda p: p.name))
+                except OSError as exc:
+                    skipped.append(
+                        {"path": dest_rel, "reason": f"walk-error:{type(exc).__name__}"}
+                    )
                 continue
             name = current.name
             if name.endswith(".lock") or name.endswith(".db") or name.startswith("cli-"):
                 continue
             if rel.parts and rel.parts[0] == ".spool":
                 continue
-            planned.append((current, f"session/tool-outputs/{rel.as_posix()}"))
-    return planned
+            planned.append((current, dest_rel))
+    return planned, skipped
 
 
 def retain_attempt_evidence(
@@ -343,7 +471,22 @@ def retain_attempt_evidence(
     candidates: list[tuple[Path, str]] = []
     reminder_records: list[dict[str, Any]] = []
     if session_path is not None:
-        candidates.extend(_iter_session_files(session_path))
+        planned, session_skipped = _iter_session_files(session_path)
+        candidates.extend(planned)
+        manifest_skipped.extend(session_skipped)
+        for entry in session_skipped:
+            reason = entry.get("reason")
+            if (
+                isinstance(reason, str)
+                and (reason.startswith("walk-error:") or reason == "invalid-child-id")
+                and reason not in gaps
+            ):
+                gaps.append(reason)
+        # The session record counts as retained only when session.jsonl was
+        # copied as a regular file. A missing log or a symlink left behind
+        # is an explicit gap, never silent "retained".
+        if "session/session.jsonl" not in {rel for _, rel in planned}:
+            gaps.append("session-record-missing")
         main_log = session_path / "session.jsonl"
         if main_log.is_file() and not main_log.is_symlink():
             try:
@@ -358,15 +501,24 @@ def retain_attempt_evidence(
             sessions_root = session_path.parents[3]
         except IndexError:
             sessions_root = session_path.parent
-        for child_id, log_path in sorted(
-            _reminder_child_log_paths(session_path, sessions_root, reminder_records).items()
-        ):
+        reminder_logs, reminder_invalid = _reminder_child_log_paths(
+            session_path, sessions_root, reminder_records
+        )
+        if reminder_invalid and "invalid-child-id" not in gaps:
+            gaps.append("invalid-child-id")
+        for child_id, log_path in sorted(reminder_logs.items()):
             candidates.append((log_path, f"session/reminder/{child_id}/{log_path.name}"))
 
     scratch_path = Path(scratch_dir) if scratch_dir else None
     scratch_entries: list[tuple[Path, str]] = []
     if scratch_path is not None and scratch_path.is_dir() and not scratch_path.is_symlink():
-        stack = sorted(scratch_path.iterdir(), key=lambda p: p.name)
+        try:
+            stack = sorted(scratch_path.iterdir(), key=lambda p: p.name)
+        except OSError as exc:
+            stack = []
+            _record_walk_error(
+                gaps, manifest_skipped, "scratch", type(exc).__name__
+            )
         while stack:
             current = stack.pop(0)
             try:
@@ -389,7 +541,18 @@ def retain_attempt_evidence(
                 )
                 continue
             if stat.S_ISDIR(info.st_mode):
-                stack.extend(sorted(current.iterdir(), key=lambda p: p.name))
+                try:
+                    stack.extend(sorted(current.iterdir(), key=lambda p: p.name))
+                except OSError as exc:
+                    manifest_skipped.append(
+                        {
+                            "path": f"scratch/{rel.as_posix()}",
+                            "reason": f"walk-error:{type(exc).__name__}",
+                        }
+                    )
+                    gap = f"walk-error:{type(exc).__name__}"
+                    if gap not in gaps:
+                        gaps.append(gap)
                 continue
             if not _is_regular(info):
                 manifest_skipped.append(
@@ -753,8 +916,6 @@ def _classify_resolved(resolved: list[str], workspace: str) -> str:
         return "allowed-system"
     if all(state == "workspace" for state in states):
         return "workspace"
-    if "outside" in states:
-        return "outside-boundary"
     return "outside-boundary"
 
 
@@ -996,6 +1157,7 @@ def _summarize_usage_records(
 
     sums = _zero_usage()
     calls = 0
+    usage_missing = 0
     provider_attributions = 0
     attributed_input = 0
     attributed_output = 0
@@ -1031,12 +1193,18 @@ def _summarize_usage_records(
             if _is_cumulative_record(record):
                 continue
             usage = event.get("usage")
+            if not isinstance(usage, Mapping):
+                # A model call without its usage object is not covered usage,
+                # never zeros: it forces partial coverage downstream.
+                usage_missing += 1
+                continue
             for key in USAGE_KEYS:
                 sums[key] += _usage_value(usage, key)
             calls += 1
     detail: dict[str, Any] = {
         **sums,
         "calls": calls,
+        "model_completed_without_usage": usage_missing,
         "usageConsistency": (
             "match"
             if (
@@ -1113,6 +1281,9 @@ def usage_summary(
         total_sums[key] += parent.get(key, 0)
     total_calls += int(parent.get("calls", 0))
     uncovered: list[str] = []
+    # A model_completed event without its usage object is not covered usage
+    # (never zeros): any such event forces partial coverage.
+    incomplete_usage = int(parent.get("model_completed_without_usage", 0)) > 0
     for child_id in sorted(children_specs):
         kind = children_specs[child_id]
         raw = (child_records_by_id or {}).get(child_id)
@@ -1128,9 +1299,14 @@ def usage_summary(
         for key in USAGE_KEYS:
             total_sums[key] += sums[key]
         total_calls += int(detail.get("calls", 0))
+        if int(detail.get("model_completed_without_usage", 0)) > 0:
+            incomplete_usage = True
+            if child_id not in uncovered:
+                uncovered.append(child_id)
 
     total = {**total_sums, "calls": total_calls} if total_calls else None
-    if uncovered:
+    if uncovered or incomplete_usage:
+        uncovered = sorted(set(uncovered))
         coverage = "partial"
         result: dict[str, Any] = {
             "source": "muse-session-record",
@@ -1178,20 +1354,32 @@ def classify_completion(
     """Classify one ``muse exec --json`` run from its stream envelopes.
 
     Completed requires all of: not timed out; exit code 0; exactly one
-    ``run.lifecycle.started`` run id with every run-scoped event using it;
-    exactly one terminal event (``payload_type`` starting with
-    ``run.terminal.``) for that run; ``payload.terminal == "completed"``; and
-    a non-empty string ``payload.text``. (Runtime contract on retained
-    records: every completed Muse run emits a terminal event whose
-    ``terminal`` is ``completed`` and whose ``text`` is the final answer;
-    ``failed``/``cancelled`` terminals carry a ``reason`` string.)
+    ``run.lifecycle.started`` run id with every run-scoped event (deltas and
+    the terminal included) carrying that same run id; exactly one terminal
+    event (``payload_type`` starting with ``run.terminal.``) for that run;
+    ``payload.terminal`` a string equal to ``"completed"``; and a non-empty
+    string ``payload.text``. (Runtime contract on retained records: every
+    completed Muse run emits a terminal event whose ``terminal`` is
+    ``completed`` and whose ``text`` is the final answer; ``failed``/
+    ``cancelled`` terminals carry a ``reason`` string.)
+
+    Statuses: ``completed``, ``timeout``, ``process-error``,
+    ``terminal-failed``, ``terminal-cancelled``, ``terminal-other`` (any other
+    terminal value, or a missing/non-string ``payload.terminal``),
+    ``missing-terminal-delta-only`` (deltas present, no terminal),
+    ``missing-terminal`` (no deltas either), ``empty-output``,
+    ``multiple-runs`` (several started run ids, a run-scoped event from
+    another run, or a terminal that does not carry the started run id),
+    ``multiple-terminals``, ``missing-trace`` (no parseable events) and
+    ``missing-run-start`` (events exist but carry no ``run.lifecycle.started``
+    run id).
 
     Returns ``{status, runId, terminalReason, output?, partialTextSha256?,
     partialTextBytes?}`` with ``output`` only when completed. Delta text is
-    never returned as output. Envelope ``stream`` objects without a session
-    shape and legacy terminal events without an explicit ``terminal`` field
-    (inferred from the ``run.terminal.<name>`` suffix) are tolerated so older
-    harnesses keep classifying.
+    never returned as output. No legacy tolerance remains: a stream without
+    ``run.lifecycle.started`` is never completed, and a terminal whose
+    ``payload.terminal`` is missing or not a string is ``terminal-other``,
+    never inferred from the ``run.terminal.<name>`` suffix.
     """
 
     parsed = [event for event in events if isinstance(event, Mapping)]
@@ -1205,6 +1393,7 @@ def classify_completion(
         }
     started_ids: list[str] = []
     scoped_ids: set[str] = set()
+    terminal_run_ids: list[str | None] = []
     terminals: list[dict[str, Any]] = []
     deltas: list[str] = []
     for event in parsed:
@@ -1222,13 +1411,12 @@ def classify_completion(
             scoped_ids.add(scoped)
         if isinstance(payload_type, str) and payload_type.startswith("run.terminal."):
             terminals.append(event)
+            terminal_run_ids.append(scoped)
         if payload_type == "run.output.delta" and isinstance(payload_dict.get("text"), str):
             deltas.append(payload_dict["text"])
 
     distinct_started = set(started_ids)
     run_id: str | None = next(iter(distinct_started)) if len(distinct_started) == 1 else None
-    if run_id is None and not distinct_started and len(scoped_ids) == 1:
-        (run_id,) = scoped_ids
     partial = "".join(deltas)
     partial_blob = partial.encode("utf-8")
     partial_info: dict[str, Any] = {}
@@ -1254,7 +1442,9 @@ def classify_completion(
         return result("timeout")
     if exit_code != 0:
         return result("process-error")
-    if len(distinct_started) > 1 or (distinct_started and not scoped_ids <= distinct_started):
+    if not distinct_started:
+        return result("missing-run-start")
+    if len(distinct_started) > 1 or not scoped_ids <= distinct_started:
         return result("multiple-runs")
     if len(terminals) > 1:
         return result("multiple-terminals")
@@ -1263,23 +1453,24 @@ def classify_completion(
             return result("missing-terminal-delta-only")
         return result("missing-terminal")
     terminal_event = terminals[0]
+    if terminal_run_ids[0] != run_id:
+        # The terminal must carry the started run id; a terminal from another
+        # run — or with no run id at all — can never complete this run.
+        return result("multiple-runs")
     terminal_payload = terminal_event.get("payload")
     terminal_payload = terminal_payload if isinstance(terminal_payload, Mapping) else {}
-    payload_type = str(terminal_event.get("payload_type") or "")
     terminal = terminal_payload.get("terminal")
-    if not isinstance(terminal, str) or not terminal:
-        terminal = payload_type[len("run.terminal.") :] or "unknown"
     reason = terminal_payload.get("reason")
-    if terminal == "completed":
-        text = terminal_payload.get("text")
-        if not isinstance(text, str) or not text:
-            empty = result("empty-output", reason)
-            return empty
-        done = result("completed", reason)
-        done["output"] = text
-        return done
-    if terminal == "failed":
-        return result("terminal-failed", reason)
-    if terminal == "cancelled":
-        return result("terminal-cancelled", reason)
-    return result("terminal-other", reason)
+    if not isinstance(terminal, str) or terminal != "completed":
+        if terminal == "failed":
+            return result("terminal-failed", reason)
+        if terminal == "cancelled":
+            return result("terminal-cancelled", reason)
+        return result("terminal-other", reason)
+    text = terminal_payload.get("text")
+    if not isinstance(text, str) or not text:
+        empty = result("empty-output", reason)
+        return empty
+    done = result("completed", reason)
+    done["output"] = text
+    return done

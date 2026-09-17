@@ -402,10 +402,6 @@ const result = spawnSync(executable, [...commands[mode], ...extraArgs], {
   },
 });
 
-if (result.error) {
-  console.error(result.error.message);
-  process.exit(1);
-}
 function writeStageAccounting(stageName, settings) {
   // Account for every scheduled slot after Promptfoo exits (completed or
   // not). When the Promptfoo output is missing, the accounting step lists

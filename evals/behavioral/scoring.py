@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -361,10 +362,25 @@ def main() -> int:
         if args.input is not None and args.input.exists():
             payload = json.loads(args.input.read_text(encoding="utf-8"))
         accounting = account_attempts(schedule, ledger_lines, payload)
+        if args.accounting_output.exists():
+            print(
+                f"refuses to overwrite existing accounting output: {args.accounting_output}",
+                flush=True,
+            )
+            return 1
         args.accounting_output.parent.mkdir(parents=True, exist_ok=True)
-        args.accounting_output.write_text(
-            json.dumps(accounting, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        try:
+            _write_new_file(
+                args.accounting_output,
+                json.dumps(accounting, indent=2, sort_keys=True) + "\n",
+            )
+        except OSError as exc:
+            print(
+                f"refuses to overwrite existing accounting output: "
+                f"{args.accounting_output} ({exc})",
+                flush=True,
+            )
+            return 1
         print(
             f"accounted {len(accounting['accounting']['slots'])} scheduled slots "
             f"with {ACCOUNTING_ID}"
@@ -378,6 +394,20 @@ def main() -> int:
         args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(f"normalized {len(result['rows'])} Promptfoo rows with {NORMALIZATION_ID}")
     return 0
+
+
+def _write_new_file(path: Path, text: str) -> None:
+    """Write a new file with O_EXCL and mode 0600; raise on existing paths."""
+
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        data = text.encode("utf-8")
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
+    finally:
+        os.close(descriptor)
 
 
 ACCOUNTING_ID = "muse-attempt-accounting-v1"
@@ -433,21 +463,80 @@ def _row_completion_status(row: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _ledger_index(
-    ledger_lines: Iterable[Mapping[str, Any]],
-) -> dict[tuple[str, str, str], list[Mapping[str, Any]]]:
-    index: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
-    for line in ledger_lines:
-        if not isinstance(line, Mapping):
-            continue
-        key = line.get("scheduleKey")
-        if not isinstance(key, str) or not key:
-            continue
+def _normalize_repeat(value: Any) -> int | None:
+    """Normalize a ledger/row repeat marker to an int slot position.
+
+    ``"null"``/None/missing means the first repeat (0); anything
+    unparseable yields None so the record matches by attempt id only and can
+    never merge two repeats positionally.
+    """
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        if value == "null" or not value:
+            return 0
+        try:
+            number = int(value)
+        except ValueError:
+            return None
+        return number if number >= 0 else None
+    if value is None:
+        return 0
+    return None
+
+
+def _ledger_slot_key(line: Mapping[str, Any]) -> tuple[str, str, int] | None:
+    """Return the (provider, case, repeat) slot a ledger line belongs to.
+
+    Explicit ``providerLabel``/``case_id``/``repeatIndex`` fields win; the
+    ``scheduleKey`` string is only a fallback for older lines. A ``null``
+    repeat means position 0 — it never merges across repeats.
+    """
+
+    label = line.get("providerLabel")
+    case = line.get("case_id")
+    if isinstance(label, str) and label and isinstance(case, str) and case:
+        repeat = _normalize_repeat(line.get("repeatIndex"))
+        if repeat is not None:
+            return (label, case, repeat)
+    key = line.get("scheduleKey")
+    if isinstance(key, str) and key:
         parts = key.split("|")
-        if len(parts) != 3:
-            continue
-        index.setdefault((parts[0], parts[1], parts[2]), []).append(line)
-    return index
+        if len(parts) == 3 and parts[0] and parts[1]:
+            repeat = _normalize_repeat(parts[2])
+            if repeat is not None:
+                return (parts[0], parts[1], repeat)
+    return None
+
+
+def _row_schedule_claim(row: Mapping[str, Any]) -> tuple[str, str, int] | None:
+    """Return the slot a row claims via its provider-metadata schedule key."""
+
+    response = row.get("response")
+    metadata = response.get("metadata") if isinstance(response, Mapping) else None
+    if not isinstance(metadata, Mapping):
+        return None
+    key = metadata.get("scheduleKey")
+    if not isinstance(key, str) or not key:
+        return None
+    parts = key.split("|")
+    if len(parts) != 3 or not parts[0] or not parts[1]:
+        return None
+    repeat = _normalize_repeat(parts[2])
+    if repeat is None:
+        return None
+    return (parts[0], parts[1], repeat)
+
+
+def _short_error(text: Any, limit: int = 160) -> str:
+    """Reduce a provider error to one short line for ``error:<message>``."""
+
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    return text.strip().splitlines()[0][:limit]
 
 
 def account_attempts(
@@ -477,31 +566,71 @@ def account_attempts(
             converted = promptfoo_rows({"results": {"results": list(raw_rows)}}, "deterministic")
         except ValueError:
             converted = []
-    grouped: dict[tuple[str, str], list[int]] = {}
+    # Ledger records keyed by attempt id and by (provider, case, repeat) slot.
+    # Rows join slots through their attempt id first (rows carry it in provider
+    # metadata); a row without a ledger-backed attempt claims its slot through
+    # its metadata schedule key. Only rows with neither fall back to
+    # positional (label, case) grouping, and consumed rows are never reused by
+    # another repeat.
+    ledger_by_attempt: dict[str, list[Mapping[str, Any]]] = {}
+    ledger_by_slot: dict[tuple[str, str, int], list[Mapping[str, Any]]] = {}
+    for line in ledger_lines or []:
+        if not isinstance(line, Mapping):
+            continue
+        attempt = line.get("attemptId")
+        if isinstance(attempt, str) and attempt:
+            ledger_by_attempt.setdefault(attempt, []).append(line)
+        slot_key = _ledger_slot_key(line)
+        if slot_key is not None:
+            ledger_by_slot.setdefault(slot_key, []).append(line)
+    claimed: dict[int, tuple[str, str, int] | None] = {}
+    fallback: dict[tuple[str, str], list[int]] = {}
     for index, row in enumerate(raw_rows):
-        grouped.setdefault((_row_label(row) or "", _row_case(row) or ""), []).append(index)
-    ledger = _ledger_index(ledger_lines or [])
+        slot: tuple[str, str, int] | None = None
+        attempt = _row_attempt_id(row)
+        if attempt and attempt in ledger_by_attempt:
+            for line in ledger_by_attempt[attempt]:
+                slot = _ledger_slot_key(line)
+                if slot is not None:
+                    break
+        if slot is None:
+            claim = _row_schedule_claim(row)
+            if (
+                claim is not None
+                and claim[0] in providers
+                and claim[1] in cases
+                and 0 <= claim[2] < repeat
+            ):
+                slot = claim
+        claimed[index] = slot
+        if slot is None:
+            fallback.setdefault((_row_label(row) or "", _row_case(row) or ""), []).append(index)
     slots: list[dict[str, Any]] = []
     extras: list[dict[str, Any]] = []
     consumed: set[int] = set()
     for provider in providers:
         for case in cases:
             for position in range(repeat):
-                key = (provider, case)
-                indices = grouped.get(key, [])
-                row_index = indices[position] if position < len(indices) else None
-                records = ledger.get((provider, case, str(position)), [])
-                if not records:
-                    records = ledger.get((provider, case, "null"), [])
+                slot_key = (provider, case, position)
+                records = ledger_by_slot.get(slot_key, [])
                 phases = {str(line.get("phase")) for line in records if isinstance(line, Mapping)}
-                ledger_attempt = next(
-                    (
-                        str(line.get("attemptId"))
-                        for line in records
-                        if isinstance(line, Mapping) and line.get("attemptId")
-                    ),
-                    None,
-                )
+                ledger_attempts: list[str] = []
+                for line in records:
+                    attempt = line.get("attemptId")
+                    if isinstance(attempt, str) and attempt and attempt not in ledger_attempts:
+                        ledger_attempts.append(attempt)
+                exact = sorted(index for index, key in claimed.items() if key == slot_key)
+                row_index: int | None = None
+                duplicate_rows = 0
+                if exact:
+                    row_index = exact[0]
+                    consumed.update(exact)
+                    duplicate_rows = len(exact) - 1
+                else:
+                    group = fallback.get((provider, case), [])
+                    if group:
+                        row_index = group.pop(0)
+                        consumed.add(row_index)
                 if row_index is None:
                     if "finished" in phases:
                         status = "missing"
@@ -515,7 +644,9 @@ def account_attempts(
                             "case": case,
                             "repeat": position,
                             "status": status,
-                            "attemptId": ledger_attempt,
+                            "attemptId": ledger_attempts[0] if ledger_attempts else None,
+                            "duplicateAttemptIds": ledger_attempts[1:],
+                            "duplicateRows": 0,
                             "ledgerPhase": "finished" if "finished" in phases else (
                                 "started" if "started" in phases else None
                             ),
@@ -526,26 +657,45 @@ def account_attempts(
                         }
                     )
                     continue
-                consumed.add(row_index)
                 row = raw_rows[row_index]
                 facts = converted[row_index] if row_index < len(converted) else {}
                 error_text = facts.get("error") if isinstance(facts, Mapping) else None
                 quarantined = bool(facts.get("quarantined")) if isinstance(facts, Mapping) else False
                 completion_status = _row_completion_status(row)
                 if error_text or not (facts.get("completion") if isinstance(facts, Mapping) else False):
-                    message = completion_status or error_text or "unknown"
+                    # A provider error on a completed run (e.g. a stale review)
+                    # must name the error, never the misleading
+                    # "error:completed"; other runs keep their status label.
+                    if completion_status and completion_status != "completed":
+                        message = completion_status
+                    else:
+                        message = _short_error(error_text) or "unknown"
                     status = f"error:{message}"
                 elif quarantined:
                     status = "quarantined"
                 else:
                     status = "completed"
+                row_attempt = _row_attempt_id(row)
+                primary = row_attempt or (ledger_attempts[0] if ledger_attempts else None)
+                seen_attempts: list[str] = []
+                for candidate in [*ledger_attempts, *(
+                    _row_attempt_id(raw_rows[i])
+                    for i in exact[1:]
+                    if _row_attempt_id(raw_rows[i])
+                )]:
+                    if candidate and candidate not in seen_attempts:
+                        seen_attempts.append(candidate)
+                if primary and primary not in seen_attempts:
+                    seen_attempts.insert(0, primary)
                 slots.append(
                     {
                         "provider": provider,
                         "case": case,
                         "repeat": position,
                         "status": status,
-                        "attemptId": _row_attempt_id(row) or ledger_attempt,
+                        "attemptId": primary,
+                        "duplicateAttemptIds": [a for a in seen_attempts if a != primary],
+                        "duplicateRows": duplicate_rows,
                         "ledgerPhase": "finished" if "finished" in phases else (
                             "started" if "started" in phases else None
                         ),
@@ -555,31 +705,31 @@ def account_attempts(
                         "completion": bool(facts.get("completion")) if isinstance(facts, Mapping) else False,
                     }
                 )
-    for (provider, case), indices in grouped.items():
-        expected = repeat if provider in providers and case in cases else 0
-        for position, row_index in enumerate(indices):
-            if row_index in consumed:
-                continue
-            row = raw_rows[row_index]
-            facts = converted[row_index] if row_index < len(converted) else {}
-            extras.append(
-                {
-                    "provider": provider or None,
-                    "case": case or None,
-                    "repeat": position,
-                    "status": "unscheduled-extra",
-                    "attemptId": _row_attempt_id(row),
-                    "ledgerPhase": None,
-                    "deterministic": facts if isinstance(facts, Mapping) else None,
-                    "flags": facts.get("grader_boundary_flags") if isinstance(facts, Mapping) else None,
-                    "error": facts.get("error") if isinstance(facts, Mapping) else None,
-                    "completion": bool(facts.get("completion")) if isinstance(facts, Mapping) else False,
-                }
-            )
+    for index, row in enumerate(raw_rows):
+        if index in consumed:
+            continue
+        facts = converted[index] if index < len(converted) else {}
+        extras.append(
+            {
+                "provider": _row_label(row),
+                "case": _row_case(row),
+                "repeat": 0,
+                "status": "unscheduled-extra",
+                "attemptId": _row_attempt_id(row),
+                "ledgerPhase": None,
+                "deterministic": facts if isinstance(facts, Mapping) else None,
+                "flags": facts.get("grader_boundary_flags") if isinstance(facts, Mapping) else None,
+                "error": facts.get("error") if isinstance(facts, Mapping) else None,
+                "completion": bool(facts.get("completion")) if isinstance(facts, Mapping) else False,
+            }
+        )
     totals: dict[str, int] = {}
     for entry in (*slots, *extras):
         totals[entry["status"]] = totals.get(entry["status"], 0) + 1
     ledger_count = sum(1 for line in (ledger_lines or []) if isinstance(line, Mapping))
+    duplicate_slots = sum(
+        1 for entry in slots if entry["duplicateAttemptIds"] or entry["duplicateRows"]
+    )
     return {
         "accounting": {
             "id": ACCOUNTING_ID,
@@ -593,6 +743,7 @@ def account_attempts(
             "slots": slots,
             "extras": extras,
             "totals": totals,
+            "duplicateSlots": duplicate_slots,
             "ledgerLines": ledger_count,
             "rows": len(raw_rows),
         }
@@ -711,7 +862,8 @@ def adjudicated_readout(
             eligible = True
             ineligible_reason = None
         key_ids = consequential_key_ids(case_id)
-        matched = 0
+        adjudication_status = "present" if owner is not None else "missing"
+        matched_ids: set[str] = set()
         optional_low_matched = 0
         novel_valid = 0
         unsupported = 0
@@ -720,12 +872,16 @@ def adjudicated_readout(
             if not isinstance(finding, Mapping):
                 continue
             finding_status = finding.get("status")
-            severity = key_severity(case_id, finding.get("key_id"))
+            key_id = finding.get("key_id")
+            severity = key_severity(case_id, key_id)
             if severity is None and isinstance(finding.get("severity"), str):
                 severity = finding["severity"]
             if finding_status == "matched":
-                if severity in CONSEQUENTIAL_SEVERITIES:
-                    matched += 1
+                # Recall counts distinct matched key ids intersected with the
+                # case's consequential ids: duplicates and non-key matches
+                # never inflate it.
+                if isinstance(key_id, str) and key_id in key_ids:
+                    matched_ids.add(key_id)
                 elif severity == "low":
                     optional_low_matched += 1
             elif finding_status == "novel-valid":
@@ -734,7 +890,11 @@ def adjudicated_readout(
                     novel_valid_consequential = True
             elif finding_status == "unsupported":
                 unsupported += 1
-        recall = (matched / len(key_ids)) if (eligible and key_ids) else None
+        matched = len(matched_ids)
+        if eligible and owner is not None and key_ids:
+            recall: float | None = matched / len(key_ids)
+        else:
+            recall = None
         case = key_cases.get(case_id) if isinstance(key_cases, Mapping) else None
         expected = case.get("expected_verdict") if isinstance(case, Mapping) else None
         actual = deterministic.get("actual_verdict") if isinstance(deterministic, Mapping) else None
@@ -757,6 +917,7 @@ def adjudicated_readout(
                 "deterministic": deterministic,
                 "adjudicated": {
                     "quarantine": quarantine,
+                    "adjudication": adjudication_status,
                     "matched_consequential": matched if eligible else 0,
                     "consequential_recall": recall,
                     "optional_low_matched": optional_low_matched if eligible else 0,
@@ -795,6 +956,10 @@ def adjudicated_readout(
         providers[str(provider)] = {
             "eligible_attempts": len(eligible_entries),
             "scheduled_attempts": len(owned),
+            "not_adjudicated": sum(
+                1 for entry in eligible_entries
+                if entry["adjudicated"].get("adjudication") == "missing"
+            ),
             "completed_review_recall": (sum(recalls) / len(recalls)) if recalls else None,
             "useful_delivery": (matched_total / key_total) if key_total else None,
             "false_approvals": sum(1 for entry in eligible_entries if entry["adjudicated"].get("false_approval")),
@@ -838,7 +1003,13 @@ def readout_main(argv: list[str] | None = None) -> int:
         print(f"readout failed: {exc}", flush=True)
         return 1
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        _write_new_file(
+            args.output, json.dumps(result, indent=2, sort_keys=True) + "\n"
+        )
+    except OSError as exc:
+        print(f"refuses to overwrite existing output: {args.output} ({exc})", flush=True)
+        return 1
     print(f"wrote adjudicated readout {READOUT_ID} to {args.output}")
     return 0
 

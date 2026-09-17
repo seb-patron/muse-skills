@@ -262,6 +262,34 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(result["status"], "multiple-terminals")
         self.assertNotIn("output", result)
 
+    def test_stream_without_run_start_is_never_completed(self):
+        # A delta from run A plus a terminal from run B, with no
+        # run.lifecycle.started anywhere, must not complete any run.
+        events = [delta_event("run-a", "half"), terminal_event("run-b", "completed", "done")]
+        result = attempt_evidence.classify_completion(events, 0, False)
+        self.assertEqual(result["status"], "missing-run-start")
+        self.assertNotIn("output", result)
+        self.assertIsNone(result["runId"])
+
+    def test_terminal_without_run_id_never_completes(self):
+        started = started_event("run-1")
+        terminal = dict(terminal_event("run-1", "completed", "done"))
+        del terminal["payload"]["run_stream"]
+        result = attempt_evidence.classify_completion([started, terminal], 0, False)
+        self.assertEqual(result["status"], "multiple-runs")
+        self.assertNotIn("output", result)
+
+    def test_terminal_missing_terminal_field_is_other(self):
+        # A terminal payload with a reason but no terminal string is
+        # terminal-other, never inferred completed from the payload suffix.
+        started = started_event("run-1")
+        terminal = dict(terminal_event("run-1", "completed", "done"))
+        del terminal["payload"]["terminal"]
+        terminal["payload"]["reason"] = "some reason"
+        result = attempt_evidence.classify_completion([started, terminal], 0, False)
+        self.assertEqual(result["status"], "terminal-other")
+        self.assertNotIn("output", result)
+
     def test_session_id_requires_exactly_one_valid_uuid(self):
         good = [stream_event("run.output.delta", {"text": "x"})]
         self.assertEqual(attempt_evidence.session_id_from_stream(good), SESSION_ID)
@@ -363,25 +391,111 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(dest.stat().st_mode), 0o700)
 
     def test_reminder_child_log_retained_when_inside_root(self):
+        log_rel = f"2026/09/16/{CHILD_ID}/session.jsonl"
         link = session_record(
             {
                 "kind": "memory_reminder_child_session_linked",
                 "parent_session_id": SESSION_ID,
-                "child_session_id": "reminder-1",
-                "child_session_log_path": "2026/09/16/reminder-1/session.jsonl",
+                "child_session_id": CHILD_ID,
+                "child_session_log_path": log_rel,
             }
         )
         session_dir = make_session_dir(
             self.sessions,
             records=[link],
-            reminders=[("reminder-1", "2026/09/16/reminder-1/session.jsonl", "{}\n")],
+            reminders=[(CHILD_ID, log_rel, "{}\n")],
         )
         result = attempt_evidence.retain_attempt_evidence(
             self.evidence, ATTEMPT_ID, session_dir, self.scratch, None
         )
         self.assertEqual(result["evidenceStatus"], "retained")
-        retained = self.evidence / ATTEMPT_ID / "session/reminder/reminder-1/session.jsonl"
+        retained = self.evidence / ATTEMPT_ID / f"session/reminder/{CHILD_ID}/session.jsonl"
         self.assertTrue(retained.is_file())
+
+    def test_traversal_child_id_never_leaves_evidence_root(self):
+        link = session_record(
+            {
+                "kind": "memory_reminder_child_session_linked",
+                "parent_session_id": SESSION_ID,
+                "child_session_id": "../../../../escaped",
+                "child_session_log_path": "2026/09/16/escaped/session.jsonl",
+            }
+        )
+        (self.sessions / "2026" / "09" / "16" / "escaped").mkdir(parents=True)
+        (self.sessions / "2026" / "09" / "16" / "escaped" / "session.jsonl").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        session_dir = make_session_dir(self.sessions, records=[link])
+        before = {path.name for path in self.root.iterdir()}
+        result = attempt_evidence.retain_attempt_evidence(
+            self.evidence, ATTEMPT_ID, session_dir, self.scratch, None
+        )
+        self.assertIn("invalid-child-id", result["evidenceGaps"])
+        self.assertNotEqual(result["evidenceStatus"], "retained")
+        # Nothing was copied outside the evidence directory.
+        self.assertEqual({path.name for path in self.root.iterdir()}, before)
+        self.assertFalse((self.root / "escaped").exists())
+
+    def test_missing_session_jsonl_is_record_missing_gap(self):
+        session_dir = make_session_dir(self.sessions, records=[])
+        (session_dir / "session.jsonl").unlink()
+        result = attempt_evidence.retain_attempt_evidence(
+            self.evidence, ATTEMPT_ID, session_dir, self.scratch, None
+        )
+        self.assertIn("session-record-missing", result["evidenceGaps"])
+        self.assertNotEqual(result["evidenceStatus"], "retained")
+
+    def test_symlinked_session_jsonl_is_record_missing_gap(self):
+        session_dir = make_session_dir(self.sessions, records=[])
+        real = session_dir / "session.jsonl"
+        body = real.read_bytes()
+        real.unlink()
+        (self.root / "real-session.jsonl").write_bytes(body)
+        real.symlink_to(self.root / "real-session.jsonl")
+        result = attempt_evidence.retain_attempt_evidence(
+            self.evidence, ATTEMPT_ID, session_dir, self.scratch, None
+        )
+        self.assertIn("session-record-missing", result["evidenceGaps"])
+        self.assertNotEqual(result["evidenceStatus"], "retained")
+        manifest = json.loads(
+            (self.evidence / ATTEMPT_ID / "manifest.json").read_text(encoding="utf-8")
+        )
+        links = [entry for entry in manifest["skipped"] if entry.get("type") == "symlink"]
+        self.assertTrue(
+            any(entry["path"] == "session/session.jsonl" for entry in links)
+        )
+
+    def test_unreadable_subdir_records_walk_error_and_manifest(self):
+        (self.scratch / "readable.txt").write_text("ok", encoding="utf-8")
+        locked = self.scratch / "locked"
+        locked.mkdir()
+        (locked / "secret.txt").write_text("secret", encoding="utf-8")
+        locked.chmod(0o000)
+        self.addCleanup(locked.chmod, 0o700)
+        session_dir = make_session_dir(self.sessions, records=[])
+        result = attempt_evidence.retain_attempt_evidence(
+            self.evidence, ATTEMPT_ID, session_dir, self.scratch, None
+        )
+        self.assertIn("walk-error:PermissionError", result["evidenceGaps"])
+        self.assertNotEqual(result["evidenceStatus"], "retained")
+        # The manifest still lands, naming the skipped path.
+        manifest = json.loads(
+            (self.evidence / ATTEMPT_ID / "manifest.json").read_text(encoding="utf-8")
+        )
+        reasons = [entry.get("reason") for entry in manifest["skipped"]]
+        self.assertIn("walk-error:PermissionError", reasons)
+
+    def test_evidence_refuses_to_overwrite_existing_file(self):
+        dest = self.evidence / ATTEMPT_ID / "session" / "session.jsonl"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("sentinel", encoding="utf-8")
+        session_dir = make_session_dir(self.sessions, records=[])
+        result = attempt_evidence.retain_attempt_evidence(
+            self.evidence, ATTEMPT_ID, session_dir, self.scratch, None
+        )
+        self.assertIn("copy-error:FileExistsError", result["evidenceGaps"])
+        # The pre-existing file is preserved, never overwritten.
+        self.assertEqual(dest.read_text(encoding="utf-8"), "sentinel")
 
     def test_symlink_in_scratch_recorded_never_followed(self):
         target = self.root / "outside-target.txt"
@@ -731,6 +845,19 @@ class UsageTests(unittest.TestCase):
         self.assertIsNone(summary["total"])
         self.assertNotIn("partialTotal", summary)
 
+    def test_model_completed_without_usage_is_partial_never_zero(self):
+        parent = [
+            model_completed_event(self.usage(10, 5)),
+            session_record({"kind": "model_completed", "duration_ms": 3}),
+        ]
+        summary = attempt_evidence.usage_summary(parent, {}, [])
+        # The call without a usage object is not covered usage: partial
+        # coverage with a null total, never zeros for the missing call.
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertEqual(summary["partialTotal"]["input_tokens"], 10)
+        self.assertEqual(summary["partialTotal"]["calls"], 1)
+
 
 class ProviderAttemptTests(unittest.TestCase):
     MODEL = "muse-spark-1.3-contributor"
@@ -797,7 +924,8 @@ class ProviderAttemptTests(unittest.TestCase):
         return make_session_dir(self.sessions, records=records, children=children)
 
     def call(self, stdout, exit_code=0, timeout=None, variant="none",
-             source="muse-skills", session_records=(), extra_config=None):
+             source="muse-skills", session_records=(), extra_config=None,
+             provider_label="synthetic-provider", repeat_index=0, no_trace=False):
         if session_records:
             self.make_session(records=session_records)
         seen = {}
@@ -823,6 +951,12 @@ class ProviderAttemptTests(unittest.TestCase):
                     "max_model_steps": 24,
                 }
             )
+        # Mirror the real Promptfoo 0.123.0 Python-provider call shape: the
+        # provider label travels in options (alongside config) and the context
+        # carries vars/test/repeatIndex/testIdx with no context["provider"].
+        options = {"config": config}
+        if provider_label is not None:
+            options["label"] = provider_label
         context = {
             "vars": {
                 "base_sha": self.base,
@@ -831,22 +965,24 @@ class ProviderAttemptTests(unittest.TestCase):
                 "source_repository": source,
             },
             "test": {"metadata": {"case_id": "synthetic-case"}},
-            "provider": {"label": "synthetic-provider"},
+            "repeatIndex": repeat_index,
+            "testIdx": 0,
         }
+        env = {"MUSE_EVAL_SESSIONS_ROOT": str(self.sessions)}
+        if not no_trace:
+            env["MUSE_EVAL_TRACE_DIR"] = str(self.trace_dir)
         with mock.patch.object(
             muse_provider, "_prepare_workspace", return_value=(self.base, self.head)
         ), mock.patch.dict(
-            os.environ,
-            {
-                "MUSE_EVAL_TRACE_DIR": str(self.trace_dir),
-                "MUSE_EVAL_SESSIONS_ROOT": str(self.sessions),
-            },
+            os.environ, env,
         ), mock.patch.object(
             muse_provider.shutil, "which", return_value="/usr/bin/muse"
         ), mock.patch.object(
             muse_provider, "_run_muse", side_effect=fake_run
         ):
-            response = muse_provider.call_api("review now", {"config": config}, context)
+            if no_trace:
+                os.environ.pop("MUSE_EVAL_TRACE_DIR", None)
+            response = muse_provider.call_api("review now", options, context)
         return response, seen
 
     def test_completed_attempt_envelope_and_ledger(self):
@@ -857,7 +993,7 @@ class ProviderAttemptTests(unittest.TestCase):
         metadata = response["metadata"]
         self.assertRegex(metadata["attemptId"], r"^[0-9a-f]{32}$")
         self.assertEqual(
-            metadata["scheduleKey"], "synthetic-provider|synthetic-case|null"
+            metadata["scheduleKey"], "synthetic-provider|synthetic-case|0"
         )
         self.assertEqual(metadata["museSessionId"], SESSION_ID)
         self.assertEqual(metadata["museRunId"], "run-1")
@@ -882,6 +1018,84 @@ class ProviderAttemptTests(unittest.TestCase):
         self.assertEqual(finished["completionStatus"], "completed")
         self.assertIsNone(finished["error"])
         self.assertEqual(finished["attemptId"], metadata["attemptId"])
+
+    def test_schedule_key_uses_options_label_and_context_repeat(self):
+        stdout = self.completed_stream()
+        self.make_session()
+        response, _ = self.call(
+            stdout, provider_label="promptfoo-label", repeat_index=2
+        )
+        self.assertNotIn("error", response)
+        metadata = response["metadata"]
+        self.assertEqual(
+            metadata["scheduleKey"], "promptfoo-label|synthetic-case|2"
+        )
+        started = json.loads(
+            (self.trace_dir / "attempts.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        self.assertEqual(started["phase"], "started")
+        self.assertEqual(started["providerLabel"], "promptfoo-label")
+        self.assertEqual(started["case_id"], "synthetic-case")
+        self.assertEqual(started["repeatIndex"], 2)
+        self.assertEqual(started["gaps"], [])
+        # A stale context["provider"] label never leaks into the key: the
+        # label comes only from options.
+        key, label, _, _ = muse_provider._schedule_identity(
+            {"label": "options-label", "config": {}},
+            {"provider": {"label": "context-label"},
+             "vars": {"case_id": "c"}, "test": {"metadata": {}},
+             "repeatIndex": 1},
+        )
+        self.assertEqual(label, "options-label")
+        self.assertEqual(key, "options-label|c|1")
+
+    def test_missing_options_label_gives_null_key_and_gap(self):
+        stdout = self.completed_stream()
+        self.make_session()
+        response, _ = self.call(stdout, provider_label=None)
+        self.assertNotIn("error", response)
+        self.assertIsNone(response["metadata"]["scheduleKey"])
+        started = json.loads(
+            (self.trace_dir / "attempts.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        self.assertEqual(started["gaps"], ["schedule-key-missing"])
+
+    def test_missing_head_binding_is_an_error_never_output(self):
+        review = json.dumps({"verdict": "APPROVE"})
+        events = [started_event("run-1"), terminal_event("run-1", "completed", review)]
+        stdout = "\n".join(json.dumps(event) for event in events)
+        self.make_session()
+        response, _ = self.call(stdout)
+        self.assertIn("error", response)
+        self.assertNotIn("output", response)
+        self.assertEqual(response["metadata"]["headBinding"], "missing")
+        self.assertEqual(response["metadata"]["completionStatus"], "completed")
+
+    def test_partial_evidence_omits_token_usage(self):
+        stdout = self.completed_stream()
+        records = [
+            model_completed_event(
+                {"input_tokens": 10, "output_tokens": 5, "cached_tokens": 0,
+                 "cache_write_tokens": 0, "cache_read_tokens": 0,
+                 "reasoning_tokens": 0}
+            ),
+            session_record({"kind": "model_completed", "duration_ms": 3}),
+        ]
+        response, _ = self.call(stdout, session_records=records)
+        self.assertNotIn("error", response)
+        metadata = response["metadata"]
+        self.assertEqual(metadata["museUsage"]["coverage"], "partial")
+        self.assertIsNone(metadata["museUsage"]["total"])
+        self.assertNotIn("tokenUsage", response)
+        self.assertEqual(metadata["candidateTokenStatus"], "partial")
+
+    def test_no_trace_dir_reports_ledger_not_enabled(self):
+        stdout = self.completed_stream()
+        self.make_session()
+        response, _ = self.call(stdout, no_trace=True)
+        self.assertNotIn("error", response)
+        self.assertEqual(response["metadata"]["ledgerStatus"], "not-enabled")
+        self.assertFalse((self.trace_dir / "attempts.jsonl").exists())
 
     def test_scratch_snapshot_retained_before_cleanup(self):
         self.make_session()
@@ -1074,15 +1288,10 @@ class ProviderAttemptTests(unittest.TestCase):
         self.assertFalse(verdict["pass"])
 
     def test_missing_evidence_quarantines_checked_row(self):
-        events = [
-            {"payload_type": "run.started", "payload": {"model": self.MODEL}},
-            {"payload_type": "agent.skill_read.observed", "payload": {"skill_id": "example"}},
-            {
-                "payload_type": "run.terminal.completed",
-                "payload": {"text": json.dumps({"verdict": "APPROVE", "head_sha": self.head})},
-            },
-        ]
-        stdout = "\n".join(json.dumps(event) for event in events)
+        # A completed run whose session record was never retained: the stream
+        # carries a full completed run, but no session dir exists, so evidence
+        # is not-retained and the checked row is quarantined.
+        stdout = self.completed_stream()
         response, _ = self.call(stdout, variant="current", source="gen-v-research-tools")
         self.assertNotIn("error", response)
         self.assertEqual(response["metadata"]["evidenceStatus"], "not-retained")
@@ -1106,6 +1315,17 @@ class ProviderAttemptTests(unittest.TestCase):
         stdout = "\n".join(json.dumps(event) for event in events)
         response, _ = self.call(stdout, variant="current", source="gen-v-research-tools")
         self.assertIn("session-record-ambiguous", response["metadata"]["evidenceGaps"])
+
+    def test_two_session_dirs_record_ambiguous_gap(self):
+        self.make_session()
+        other_day = self.sessions / "2026" / "09" / "17" / SESSION_ID
+        other_day.mkdir(parents=True, exist_ok=True)
+        (other_day / "session.jsonl").write_text("{}\n", encoding="utf-8")
+        stdout = self.completed_stream()
+        response, _ = self.call(stdout, variant="current", source="gen-v-research-tools")
+        self.assertNotIn("error", response)
+        self.assertIn("session-record-ambiguous", response["metadata"]["evidenceGaps"])
+        self.assertNotIn("session-record-missing", response["metadata"]["evidenceGaps"])
 
     def test_ledger_failure_keeps_review_but_quarantines(self):
         self.trace_dir.chmod(0o500)
@@ -1255,6 +1475,116 @@ class AccountingTests(unittest.TestCase):
         self.assertEqual(statuses.count("missing"), 3)
         self.assertEqual(statuses.count("started-not-finished"), 1)
 
+    def test_repeat_two_slots_never_share_rows(self):
+        schedule = {"stage": "synthetic", "providers": ["p1"], "cases": ["c1"],
+                    "repeat": 2}
+        rows = [
+            deterministic_row("p1", "c1", "APPROVE", attempt="attempt-a"),
+            deterministic_row("p1", "c1", "NEEDS_FIXES", attempt="attempt-b"),
+        ]
+        ledger = [
+            {"phase": "started", "attemptId": "attempt-a", "scheduleKey": "p1|c1|0",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 0},
+            {"phase": "finished", "attemptId": "attempt-a", "scheduleKey": "p1|c1|0",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 0,
+             "completionStatus": "completed", "error": None},
+            {"phase": "started", "attemptId": "attempt-b", "scheduleKey": "p1|c1|1",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 1},
+            {"phase": "finished", "attemptId": "attempt-b", "scheduleKey": "p1|c1|1",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 1,
+             "completionStatus": "completed", "error": None},
+        ]
+        result = scoring.account_attempts(
+            schedule, ledger, {"results": {"results": rows}}
+        )
+        slots = result["accounting"]["slots"]
+        self.assertEqual(len(slots), 2)
+        by_repeat = {slot["repeat"]: slot for slot in slots}
+        # Each repeat keeps its own attempt: the first row is never reused.
+        self.assertEqual(by_repeat[0]["attemptId"], "attempt-a")
+        self.assertEqual(by_repeat[1]["attemptId"], "attempt-b")
+        self.assertEqual(by_repeat[0]["status"], "completed")
+        self.assertEqual(by_repeat[1]["status"], "completed")
+        self.assertEqual(result["accounting"]["duplicateSlots"], 0)
+        self.assertEqual(result["accounting"]["extras"], [])
+
+    def test_repeat_two_missing_and_unfinished_slots(self):
+        schedule = {"stage": "synthetic", "providers": ["p1"], "cases": ["c1"],
+                    "repeat": 2}
+        rows = [deterministic_row("p1", "c1", "APPROVE", attempt="attempt-a")]
+        ledger = [
+            {"phase": "started", "attemptId": "attempt-a", "scheduleKey": "p1|c1|0",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 0},
+            {"phase": "finished", "attemptId": "attempt-a", "scheduleKey": "p1|c1|0",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 0,
+             "completionStatus": "completed", "error": None},
+            {"phase": "started", "attemptId": "attempt-b", "scheduleKey": "p1|c1|1",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 1},
+        ]
+        result = scoring.account_attempts(
+            schedule, ledger, {"results": {"results": rows}}
+        )
+        by_repeat = {slot["repeat"]: slot for slot in result["accounting"]["slots"]}
+        self.assertEqual(by_repeat[0]["status"], "completed")
+        self.assertEqual(by_repeat[0]["attemptId"], "attempt-a")
+        # The unfinished repeat keeps its own ledger attempt id instead of
+        # reusing the finished repeat's row.
+        self.assertEqual(by_repeat[1]["status"], "started-not-finished")
+        self.assertEqual(by_repeat[1]["attemptId"], "attempt-b")
+
+    def test_repeat_two_duplicate_attempts_reported_not_merged(self):
+        schedule = {"stage": "synthetic", "providers": ["p1"], "cases": ["c1"],
+                    "repeat": 1}
+        rows = [
+            deterministic_row("p1", "c1", "APPROVE", attempt="attempt-a"),
+            deterministic_row("p1", "c1", "APPROVE", attempt="attempt-c"),
+        ]
+        ledger = [
+            {"phase": "started", "attemptId": "attempt-a", "scheduleKey": "p1|c1|0",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 0},
+            {"phase": "finished", "attemptId": "attempt-a", "scheduleKey": "p1|c1|0",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 0,
+             "completionStatus": "completed", "error": None},
+            {"phase": "started", "attemptId": "attempt-c", "scheduleKey": "p1|c1|0",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 0},
+            {"phase": "finished", "attemptId": "attempt-c", "scheduleKey": "p1|c1|0",
+             "providerLabel": "p1", "case_id": "c1", "repeatIndex": 0,
+             "completionStatus": "completed", "error": None},
+        ]
+        result = scoring.account_attempts(
+            schedule, ledger, {"results": {"results": rows}}
+        )
+        (slot,) = result["accounting"]["slots"]
+        self.assertEqual(slot["status"], "completed")
+        self.assertEqual(slot["attemptId"], "attempt-a")
+        self.assertEqual(slot["duplicateAttemptIds"], ["attempt-c"])
+        self.assertEqual(slot["duplicateRows"], 1)
+        self.assertEqual(result["accounting"]["duplicateSlots"], 1)
+        self.assertEqual(result["accounting"]["extras"], [])
+
+    def test_error_names_message_not_completed_status(self):
+        rows = [
+            deterministic_row(
+                "p1", "c1", None,
+                error="stale/mismatched review: reported head 'x' is stale",
+                attempt="attempt-e1", completion_status="completed",
+            ),
+        ]
+        ledger = [
+            {"phase": "started", "scheduleKey": "p1|c1|null", "attemptId": "attempt-e1"},
+            {"phase": "finished", "scheduleKey": "p1|c1|null", "attemptId": "attempt-e1",
+             "completionStatus": "completed", "error": "stale/mismatched review"},
+        ]
+        result = scoring.account_attempts(
+            self.SCHEDULE, ledger, {"results": {"results": rows}}
+        )
+        by_slot = {(slot["provider"], slot["case"]): slot
+                   for slot in result["accounting"]["slots"]}
+        status = by_slot["p1", "c1"]["status"]
+        self.assertTrue(status.startswith("error:"))
+        self.assertNotEqual(status, "error:completed")
+        self.assertIn("stale/mismatched", status)
+
     def test_accounting_cli_writes_file(self):
         with tempfile.TemporaryDirectory() as temp:
             schedule_path = Path(temp) / "schedule.json"
@@ -1271,6 +1601,22 @@ class AccountingTests(unittest.TestCase):
             payload = json.loads(out_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["accounting"]["id"], "muse-attempt-accounting-v1")
             self.assertEqual(len(payload["accounting"]["slots"]), 4)
+
+    def test_accounting_cli_refuses_to_overwrite(self):
+        with tempfile.TemporaryDirectory() as temp:
+            schedule_path = Path(temp) / "schedule.json"
+            schedule_path.write_text(json.dumps(self.SCHEDULE), encoding="utf-8")
+            out_path = Path(temp) / "accounting.json"
+            out_path.write_text("preserve me\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "evals/behavioral/scoring.py",
+                 "--schedule", str(schedule_path),
+                 "--accounting-output", str(out_path)],
+                cwd=experiment.ROOT,
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(out_path.read_text(encoding="utf-8"), "preserve me\n")
 
 
 def readout_slot(provider, case, status, attempt, actual, quarantined=False,
@@ -1383,6 +1729,8 @@ def readout_adjudication():
                      "severity": "should-fix"},
                 ],
             },
+            "A6": {"quarantine": None, "rationale": "", "findings": []},
+            "A7": {"quarantine": None, "rationale": "", "findings": []},
         },
     }
 
@@ -1457,6 +1805,98 @@ class ReadoutTests(unittest.TestCase):
         self.assertAlmostEqual(p2["useful_delivery"], 0.0)
         self.assertEqual(p2["false_approvals"], 1)
         self.assertEqual(p2["false_blocks"], 1)
+
+    def test_recall_dedupes_and_intersects_key_ids(self):
+        accounting = {
+            "accounting": {
+                "id": "muse-attempt-accounting-v1",
+                "stage": "synthetic",
+                "schedule": {"providers": ["p9"]},
+                "slots": [readout_slot("p9", "c1", "completed", "B1", "NEEDS_FIXES")],
+            }
+        }
+        adjudication = {
+            "adjudication_id": "owner-9",
+            "decided_by": "owner",
+            "attempts": {
+                "B1": {
+                    "quarantine": None,
+                    "rationale": "",
+                    "findings": [
+                        {"review_index": 0, "status": "matched", "key_id": "k1",
+                         "severity": "blocking"},
+                        {"review_index": 1, "status": "matched", "key_id": "k1",
+                         "severity": "blocking"},
+                        {"review_index": 2, "status": "matched", "key_id": "unknown-kx",
+                         "severity": "blocking"},
+                        {"review_index": 3, "status": "matched", "key_id": "k3",
+                         "severity": "low"},
+                    ],
+                },
+            },
+        }
+        (entry,) = scoring.adjudicated_readout(
+            accounting, READOUT_KEY_MAP, adjudication
+        )["readout"]["attempts"]
+        # Duplicates collapse and non-key matches never inflate recall: only
+        # distinct matched key ids intersected with the consequential set.
+        self.assertEqual(entry["adjudicated"]["matched_consequential"], 1)
+        self.assertAlmostEqual(entry["adjudicated"]["consequential_recall"], 0.5)
+        self.assertEqual(entry["adjudicated"]["optional_low_matched"], 1)
+
+    def test_missing_adjudication_is_null_and_counted(self):
+        accounting = {
+            "accounting": {
+                "id": "muse-attempt-accounting-v1",
+                "stage": "synthetic",
+                "schedule": {"providers": ["p9"]},
+                "slots": [
+                    readout_slot("p9", "c1", "completed", "B1", "NEEDS_FIXES"),
+                    readout_slot("p9", "c1", "completed", "B2", "NEEDS_FIXES"),
+                    readout_slot("p9", "c1", "quarantined", "B3", "NEEDS_FIXES",
+                                 quarantined=True),
+                ],
+            }
+        }
+        adjudication = {
+            "adjudication_id": "owner-9",
+            "decided_by": "owner",
+            "attempts": {
+                "B1": {
+                    "quarantine": None,
+                    "rationale": "",
+                    "findings": [
+                        {"review_index": 0, "status": "matched", "key_id": "k1",
+                         "severity": "blocking"},
+                    ],
+                },
+                "B3": {
+                    "quarantine": "confirmed-exposure",
+                    "rationale": "leak",
+                    "findings": [
+                        {"review_index": 0, "status": "matched", "key_id": "k1",
+                         "severity": "blocking"},
+                        {"review_index": 1, "status": "matched", "key_id": "k2",
+                         "severity": "should-fix"},
+                    ],
+                },
+            },
+        }
+        readout = scoring.adjudicated_readout(
+            accounting, READOUT_KEY_MAP, adjudication
+        )["readout"]
+        by_attempt = {entry["attemptId"]: entry for entry in readout["attempts"]}
+        # An eligible attempt with no adjudication record is missing with a
+        # null recall, never a miss.
+        self.assertEqual(by_attempt["B2"]["adjudicated"]["adjudication"], "missing")
+        self.assertIsNone(by_attempt["B2"]["adjudicated"]["consequential_recall"])
+        # The excluded attempt's matches contribute nothing to delivery.
+        self.assertFalse(by_attempt["B3"]["eligible"])
+        self.assertEqual(by_attempt["B3"]["adjudicated"]["matched_consequential"], 0)
+        provider = readout["providers"]["p9"]
+        self.assertEqual(provider["not_adjudicated"], 1)
+        self.assertAlmostEqual(provider["completed_review_recall"], 0.5)
+        self.assertAlmostEqual(provider["useful_delivery"], 1 / 6)
 
     def test_readout_refuses_to_overwrite_output(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1556,6 +1996,119 @@ class RunnerAccountingTests(unittest.TestCase):
                         shutil.rmtree(artifact, ignore_errors=True)
                     else:
                         artifact.unlink(missing_ok=True)
+
+
+    def test_runner_writes_accounting_on_promptfoo_exit_1(self):
+        output = experiment.ROOT / "evals/behavioral/results/evidence-claims-v3-screen.json"
+        artifacts = [output, *(Path(f"{output}{suffix}") for suffix in (
+            ".metrics-v2.json", ".reservation.json", ".promptfoo", ".traces",
+            ".schedule.json", ".accounting-v1.json"))]
+        for artifact in artifacts:
+            self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
+        rows = []
+        for label in ("screen-evidence-claims-v2", "screen-evidence-claims-v3"):
+            for case in experiment._load(experiment.DEVELOPMENT_V3_CASES):
+                verdict = case["vars"]["expected_verdict"]
+                rows.append(deterministic_row(label, case["metadata"]["case_id"], verdict))
+        with tempfile.TemporaryDirectory() as temp:
+            canned = Path(temp) / "canned.json"
+            canned.write_text(json.dumps({"results": {"results": rows}}), encoding="utf-8")
+            fake_bin = Path(temp) / "bin"
+            fake_bin.mkdir()
+            promptfoo = fake_bin / "promptfoo"
+            promptfoo.write_text(
+                '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\n'
+                'cp "$FAKE_CANNED" "$out"\nexit 1\n',
+                encoding="utf-8",
+            )
+            promptfoo.chmod(0o700)
+            try:
+                result = subprocess.run(
+                    ["node", "evals/behavioral/run.mjs", "evidence-claims-v3-screen"],
+                    cwd=experiment.ROOT, capture_output=True, text=True, check=False,
+                    env={
+                        **os.environ,
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                        "SPIKE_PYTHON": sys.executable,
+                        "FAKE_CANNED": str(canned),
+                        "MUSE_EVAL_WORKSPACE_BASE": str(Path(temp) / "outside"),
+                    },
+                )
+                # A non-completed Promptfoo exit still lands accounting first.
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                accounting = json.loads(
+                    Path(f"{output}.accounting-v1.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(accounting["accounting"]["id"], "muse-attempt-accounting-v1")
+                self.assertEqual(len(accounting["accounting"]["slots"]), 6)
+            finally:
+                for artifact in artifacts:
+                    if artifact.is_dir():
+                        shutil.rmtree(artifact, ignore_errors=True)
+                    else:
+                        artifact.unlink(missing_ok=True)
+
+    def test_runner_writes_accounting_when_promptfoo_missing(self):
+        output = experiment.ROOT / "evals/behavioral/results/evidence-claims-v3-screen.json"
+        artifacts = [output, *(Path(f"{output}{suffix}") for suffix in (
+            ".metrics-v2.json", ".reservation.json", ".promptfoo", ".traces",
+            ".schedule.json", ".accounting-v1.json"))]
+        for artifact in artifacts:
+            self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
+        with tempfile.TemporaryDirectory() as temp:
+            # A PATH with only the directories needed for node/python/git:
+            # no promptfoo binary, so the spawn fails with ENOENT.
+            dirs = {shutil.which("node"), sys.executable, shutil.which("git")}
+            path = os.pathsep.join(
+                sorted({str(Path(tool).parent) for tool in dirs if tool})
+            )
+            self.assertNotIn("promptfoo", path)
+            try:
+                result = subprocess.run(
+                    ["node", "evals/behavioral/run.mjs", "evidence-claims-v3-screen"],
+                    cwd=experiment.ROOT, capture_output=True, text=True, check=False,
+                    env={
+                        **os.environ,
+                        "PATH": path,
+                        "SPIKE_PYTHON": sys.executable,
+                        "MUSE_EVAL_WORKSPACE_BASE": str(Path(temp) / "outside"),
+                    },
+                )
+                # The missing binary fails the stage, but only after the
+                # accounting file is written from the schedule alone.
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                accounting = json.loads(
+                    Path(f"{output}.accounting-v1.json").read_text(encoding="utf-8")
+                )
+                slots = accounting["accounting"]["slots"]
+                self.assertEqual(len(slots), 6)
+                self.assertTrue(all(slot["status"] == "missing" for slot in slots))
+            finally:
+                for artifact in artifacts:
+                    if artifact.is_dir():
+                        shutil.rmtree(artifact, ignore_errors=True)
+                    else:
+                        artifact.unlink(missing_ok=True)
+
+    def test_has_complete_accounting_checks_slot_statuses(self):
+        script = (
+            "import { hasCompleteAccounting } from './evals/behavioral/selection.mjs';\n"
+            "const ok = { accounting: { id: 'muse-attempt-accounting-v1', slots: [\n"
+            "  { status: 'completed' }, { status: 'quarantined' } ] } };\n"
+            "const bad = { accounting: { id: 'muse-attempt-accounting-v1', slots: [\n"
+            "  { status: 'completed' }, { status: 'missing' } ] } };\n"
+            "const wrongId = { accounting: { id: 'other', slots: [\n"
+            "  { status: 'completed' } ] } };\n"
+            "if (!hasCompleteAccounting(ok, 2)) { console.error('completed rejected'); process.exit(1); }\n"
+            "if (hasCompleteAccounting(bad, 2)) { console.error('missing accepted'); process.exit(1); }\n"
+            "if (hasCompleteAccounting(wrongId, 1)) { console.error('wrong id accepted'); process.exit(1); }\n"
+            "if (hasCompleteAccounting(ok, 3)) { console.error('wrong row count accepted'); process.exit(1); }\n"
+        )
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=experiment.ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class ProtectedIdentityTests(unittest.TestCase):

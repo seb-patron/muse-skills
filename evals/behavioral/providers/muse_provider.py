@@ -36,11 +36,13 @@ except ImportError:  # Promptfoo loads provider files outside their package.
 
 try:
     from .attempt_evidence import (
+        SESSION_ID_RE,
         classify_completion,
         default_sessions_root,
         locate_session_dir,
         path_scope,
         retain_attempt_evidence,
+        session_dir_is_ambiguous,
         session_id_from_stream,
         session_record_gap,
         tool_lookups,
@@ -49,11 +51,13 @@ try:
     )
 except ImportError:  # Promptfoo loads provider files outside their package.
     from attempt_evidence import (  # type: ignore[no-redef]
+        SESSION_ID_RE,
         classify_completion,
         default_sessions_root,
         locate_session_dir,
         path_scope,
         retain_attempt_evidence,
+        session_dir_is_ambiguous,
         session_id_from_stream,
         session_record_gap,
         tool_lookups,
@@ -541,44 +545,56 @@ def _stream_events(stdout: str) -> list[dict[str, Any]]:
 
 
 def _schedule_identity(
-    context: dict[str, Any], candidate_id: str | None
-) -> tuple[str | None, str | None, str | None]:
+    options: dict[str, Any],
+    context: dict[str, Any],
+) -> tuple[str | None, str | None, str | None, int | None]:
     """Build the attempt schedule key ``<provider>|<case>|<repeat or null>``.
 
-    The provider label, case id and repeat index come from the Promptfoo
-    context when available; the key is None when the label or case is unknown.
+    Under real Promptfoo the Python provider receives ``options`` carrying
+    ``label`` (alongside ``config``) and a ``context`` with ``vars``,
+    ``test``, ``repeatIndex`` and ``testIdx`` — and no ``context["provider"]``
+    label. The label therefore comes only from ``options.get("label")``; a
+    missing label yields a None key (the gap is recorded in the ledger line),
+    never a ``current|…``/``None`` guess from the context. The repeat index
+    comes from ``context.get("repeatIndex")`` first, then the older
+    metadata/vars keys. The case id comes from the test metadata or vars.
     """
 
-    variables = context.get("vars") or {}
-    test = context.get("test") or {}
-    test_metadata = test.get("metadata") or {} if isinstance(test, dict) else {}
-    provider_block = context.get("provider") or {}
-    label = None
-    if isinstance(provider_block, dict):
-        label = provider_block.get("label") or provider_block.get("id")
-    if not label and isinstance(context.get("label"), str):
-        label = context.get("label")
-    if not label:
-        label = candidate_id
-    case_id = test_metadata.get("case_id") if isinstance(test_metadata, dict) else None
-    if not case_id:
+    label = options.get("label") if isinstance(options, dict) else None
+    if not isinstance(label, str) or not label:
+        label = None
+    variables = context.get("vars") if isinstance(context, dict) else None
+    variables = variables if isinstance(variables, dict) else {}
+    test = context.get("test") if isinstance(context, dict) else None
+    test_metadata = test.get("metadata") if isinstance(test, dict) else None
+    test_metadata = test_metadata if isinstance(test_metadata, dict) else {}
+    case_id = test_metadata.get("case_id")
+    if not isinstance(case_id, str) or not case_id:
         case_id = variables.get("case_id")
+    if not isinstance(case_id, str) or not case_id:
+        case_id = None
     repeat = None
-    for source in (test_metadata, variables, context):
-        if not isinstance(source, dict):
-            continue
-        for key in ("repeat_index", "repeatIndex", "repeat", "n"):
-            value = source.get(key)
-            if isinstance(value, bool):
+    context_repeat = context.get("repeatIndex") if isinstance(context, dict) else None
+    if isinstance(context_repeat, bool):
+        context_repeat = None
+    if isinstance(context_repeat, int) and context_repeat >= 0:
+        repeat = context_repeat
+    else:
+        for source in (test_metadata, variables):
+            if not isinstance(source, dict):
                 continue
-            if isinstance(value, int) and value >= 0:
-                repeat = value
+            for key in ("repeat_index", "repeatIndex", "repeat", "n"):
+                value = source.get(key)
+                if isinstance(value, bool):
+                    continue
+                if isinstance(value, int) and value >= 0:
+                    repeat = value
+                    break
+            if repeat is not None:
                 break
-        if repeat is not None:
-            break
     if not label or not case_id:
-        return None, label, case_id
-    return f"{label}|{case_id}|{repeat if repeat is not None else 'null'}", label, case_id
+        return None, label, case_id, repeat
+    return f"{label}|{case_id}|{repeat if repeat is not None else 'null'}", label, case_id, repeat
 
 
 def _reported_head_sha(output: str) -> str | None:
@@ -713,7 +729,14 @@ def _retained_attempt_records(
         if event.get("kind") != "memory_reminder_child_session_linked":
             continue
         child_id = event.get("child_session_id")
-        if isinstance(child_id, str) and child_id and child_id not in reminder_ids:
+        # Child ids reach the filesystem below; only session UUIDs pass, so a
+        # traversal id can never escape the evidence directory.
+        if (
+            isinstance(child_id, str)
+            and child_id
+            and SESSION_ID_RE.match(child_id)
+            and child_id not in reminder_ids
+        ):
             reminder_ids.append(child_id)
     for child_id in reminder_ids:
         child_dir = reminders / child_id
@@ -741,6 +764,16 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
     muse_binary = str(config.get("muse_binary") or os.environ.get("MUSE_EVAL_BINARY") or "muse")
     timeout_seconds = int(config.get("timeout_seconds", 1200))
     trace_dir = os.environ.get("MUSE_EVAL_TRACE_DIR")
+
+    # Post-launch state for the finished-ledger guarantee: every provider exit
+    # path after the attempt launches writes the finished ledger line, even
+    # when retention or accounting itself raises.
+    attempt_id: str | None = None
+    schedule_key: str | None = None
+    provider_label: str | None = None
+    ledger_case_id: str | None = None
+    ledger_repeat: int | None = None
+    finished_written = False
 
     try:
         repo_root = _repo_root(options)
@@ -842,9 +875,10 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 pass
             env["TMPDIR"] = env["TMP"] = env["TEMP"] = str(scratch)
             attempt_id = uuid.uuid4().hex
-            schedule_key, provider_label, ledger_case_id = _schedule_identity(
-                context, candidate_id
+            schedule_key, provider_label, ledger_case_id, ledger_repeat = _schedule_identity(
+                options, context
             )
+            started_gaps = [] if schedule_key else ["schedule-key-missing"]
             ledger_ok = _append_ledger(
                 trace_dir,
                 {
@@ -853,6 +887,8 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                     "scheduleKey": schedule_key,
                     "providerLabel": provider_label,
                     "case_id": ledger_case_id,
+                    "repeatIndex": ledger_repeat,
+                    "gaps": started_gaps,
                     "startedAt": time.time(),
                 },
             )
@@ -942,7 +978,13 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                     evidence_root, attempt_id, session_dir, scratch, None
                 )
                 gaps = list(retention["evidenceGaps"])
-                if session_dir is None and session_record_gap(events) == "session-record-ambiguous":
+                if session_dir is None and (
+                    session_record_gap(events) == "session-record-ambiguous"
+                    or (
+                        muse_session_id is not None
+                        and session_dir_is_ambiguous(sessions_root, muse_session_id)
+                    )
+                ):
                     gaps = [
                         "session-record-ambiguous" if gap == "session-record-missing" else gap
                         for gap in gaps
@@ -971,6 +1013,19 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 )
                 lookups = tool_lookups(stdout, workspace, tagged_records, scratch)
                 usage = usage_summary(retained_parent, retained_children, retained_linked)
+                if evidence_status != "retained" and usage.get("coverage") == "complete":
+                    # Usage read from incomplete evidence is not covered usage:
+                    # a subagent log that could not be copied (or any other
+                    # retention gap) forces partial coverage, so tokenUsage is
+                    # omitted and the candidate status is partial, never zeros.
+                    total = usage.get("total")
+                    usage = {
+                        **usage,
+                        "total": None,
+                        "partialTotal": dict(total) if isinstance(total, dict) else total,
+                        "uncoveredChildren": list(usage.get("uncoveredChildren") or []),
+                        "coverage": "partial",
+                    }
                 metadata["writtenFiles"] = written_files
                 metadata["toolLookups"] = lookups
                 metadata["museUsage"] = usage
@@ -1013,6 +1068,8 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                     metadata.pop("_compatTokenUsage", None)
 
             def failed(message: str) -> dict[str, Any]:
+                nonlocal finished_written
+                finished_written = True
                 metadata.pop("_compatTokenUsage", None)
                 ledger_ok = _append_ledger(
                     trace_dir,
@@ -1020,6 +1077,9 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                         "phase": "finished",
                         "attemptId": attempt_id,
                         "scheduleKey": schedule_key,
+                        "providerLabel": provider_label,
+                        "case_id": ledger_case_id,
+                        "repeatIndex": ledger_repeat,
                         "completionStatus": completion["status"],
                         "flags": list(metadata.get("graderBoundaryFlags") or []),
                         "evidenceStatus": metadata.get("evidenceStatus"),
@@ -1028,8 +1088,14 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                     },
                 )
                 # A ledger write failure quarantines the row but never discards
-                # a finished review.
-                metadata["ledgerStatus"] = "ok" if ledger_ok else "failed"
+                # a finished review. An earlier started-write failure is never
+                # overwritten back to ok, and a disabled ledger stays
+                # not-enabled rather than ok.
+                if metadata.get("ledgerStatus") != "failed":
+                    if not trace_dir:
+                        metadata["ledgerStatus"] = "not-enabled"
+                    else:
+                        metadata["ledgerStatus"] = "ok" if ledger_ok else "failed"
                 if not ledger_ok and checked and "ledger-unavailable" not in metadata["graderBoundaryFlags"]:
                     metadata["graderBoundaryFlags"] = sorted(
                         [*metadata["graderBoundaryFlags"], "ledger-unavailable"]
@@ -1073,12 +1139,16 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
             if workspace_binding == "mismatch":
                 return failed("stale/mismatched review: session workspace does not bind to this attempt")
 
+            finished_written = True
             finished_ok = _append_ledger(
                 trace_dir,
                 {
                     "phase": "finished",
                     "attemptId": attempt_id,
                     "scheduleKey": schedule_key,
+                    "providerLabel": provider_label,
+                    "case_id": ledger_case_id,
+                    "repeatIndex": ledger_repeat,
                     "completionStatus": completion["status"],
                     "flags": list(metadata.get("graderBoundaryFlags") or []),
                     "evidenceStatus": metadata.get("evidenceStatus"),
@@ -1106,4 +1176,50 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 response["tokenUsage"] = parsed["usage"]
             return response
     except (OSError, ProviderError, ValueError) as exc:
-        return {"error": str(exc)}
+        message = str(exc)
+        if attempt_id is not None and not finished_written:
+            # The attempt launched: the finished line must still land, with
+            # whatever metadata was built, so the slot never goes silent.
+            try:
+                prior_metadata = metadata
+            except UnboundLocalError:
+                prior_metadata = {}
+            if not isinstance(prior_metadata, dict):
+                prior_metadata = {}
+            try:
+                prior_completion = completion
+            except UnboundLocalError:
+                prior_completion = {}
+            status = prior_completion.get("status") if isinstance(prior_completion, dict) else None
+            finished_written = True
+            try:
+                wrote = _append_ledger(
+                    trace_dir,
+                    {
+                        "phase": "finished",
+                        "attemptId": attempt_id,
+                        "scheduleKey": schedule_key,
+                        "providerLabel": provider_label,
+                        "case_id": ledger_case_id,
+                        "repeatIndex": ledger_repeat,
+                        "completionStatus": status,
+                        "flags": list(prior_metadata.get("graderBoundaryFlags") or []),
+                        "evidenceStatus": prior_metadata.get("evidenceStatus"),
+                        "error": message,
+                        "finishedAt": time.time(),
+                    },
+                )
+            except OSError:
+                wrote = False
+            if not trace_dir:
+                ledger_status = "not-enabled"
+            else:
+                ledger_status = "ok" if wrote else "failed"
+            if prior_metadata.get("ledgerStatus") == "failed":
+                ledger_status = "failed"
+            metadata_out = dict(prior_metadata)
+            metadata_out.setdefault("attemptId", attempt_id)
+            metadata_out.setdefault("scheduleKey", schedule_key)
+            metadata_out["ledgerStatus"] = ledger_status
+            return {"error": message, "metadata": metadata_out}
+        return {"error": message}

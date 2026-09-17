@@ -149,9 +149,15 @@ class BehavioralProviderTests(unittest.TestCase):
             review = json.dumps({"verdict": "APPROVE", "head_sha": self.head})
             events = envelop([
                 {"payload_type": "run.started", "payload": {"model": "muse-spark-1.3-contributor"}},
+                {"payload_type": "run.lifecycle.started", "payload": {
+                    "command_id": "cmd-1", "kind": "exec", "prompt": "review",
+                    "run_stream": {"kind": "run", "id": "run-1"}}},
                 {"payload_type": "agent.skill_read.observed", "payload": {"skill_id": "example"}},
                 *trace_for_workspace(workspace),
-                {"payload_type": "run.terminal.completed", "payload": {"text": review}},
+                {"payload_type": "run.terminal.completed", "payload": {
+                    "command_id": "cmd-1", "kind": "terminal",
+                    "run_stream": {"kind": "run", "id": "run-1"},
+                    "terminal": "completed", "text": review, "reason": None}},
             ])
             return subprocess.CompletedProcess(args, 0, "\n".join(json.dumps(e) for e in events), "")
 
@@ -558,10 +564,21 @@ class BehavioralProviderTests(unittest.TestCase):
         self.assertEqual(raised.exception.output, "partial")
 
     def test_ordinary_muse_baseline_can_use_environment_model_override(self):
-        output = json.dumps({
-            "payload_type": "run.terminal.completed",
-            "payload": {"text": json.dumps({"verdict": "APPROVE", "head_sha": self.head})},
-        })
+        output = "\n".join(json.dumps(event) for event in [
+            {"payload_type": "run.lifecycle.started", "payload": {
+                "command_id": "cmd-1", "kind": "exec", "prompt": "review",
+                "run_stream": {"kind": "run", "id": "run-1"}}},
+            {
+                "payload_type": "run.terminal.completed",
+                "payload": {
+                    "command_id": "cmd-1", "kind": "terminal",
+                    "run_stream": {"kind": "run", "id": "run-1"},
+                    "terminal": "completed",
+                    "text": json.dumps({"verdict": "APPROVE", "head_sha": self.head}),
+                    "reason": None,
+                },
+            },
+        ])
         with mock.patch.object(muse_provider, "_prepare_workspace", return_value=(self.base, self.head)):
             with mock.patch.object(muse_provider.shutil, "which", return_value="/usr/bin/muse"):
                 with mock.patch.object(
@@ -579,13 +596,17 @@ class BehavioralProviderTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][run.call_args.args[0].index("--model") + 1], "baseline-model")
 
     def test_spike_skill_activation_failure_is_an_execution_error(self):
-        output = json.dumps({
-            "payload_type": "run.started",
-            "payload": {"model": "muse-spark-1.3-contributor"},
-        }) + "\n" + json.dumps({
-            "payload_type": "run.terminal.completed",
-            "payload": {"text": "{}"},
-        })
+        output = "\n".join(json.dumps(event) for event in [
+            {"payload_type": "run.lifecycle.started", "payload": {
+                "command_id": "cmd-1", "kind": "exec", "prompt": "review",
+                "run_stream": {"kind": "run", "id": "run-1"}}},
+            {"payload_type": "run.started",
+             "payload": {"model": "muse-spark-1.3-contributor"}},
+            {"payload_type": "run.terminal.completed", "payload": {
+                "command_id": "cmd-1", "kind": "terminal",
+                "run_stream": {"kind": "run", "id": "run-1"},
+                "terminal": "completed", "text": "{}", "reason": None}},
+        ])
         digest = hashlib.sha256((self.repo / "skills/example/SKILL.md").read_bytes()).hexdigest()
         with mock.patch.object(muse_provider, "_prepare_workspace", return_value=(self.base, self.head)):
             with mock.patch.object(muse_provider.shutil, "which", return_value="/usr/bin/muse"):
