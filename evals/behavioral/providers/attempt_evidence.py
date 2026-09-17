@@ -1424,12 +1424,23 @@ def _summarize_usage_records(
                 else:
                     sums[key] += value
             calls += 1
+    # A session's usage is covered only when its per-call usage is actually
+    # established: at least one complete model_completed call, no
+    # usage-missing call, and no provider attribution reporting positive
+    # tokens the per-call records do not account for. A bare parseable
+    # record never counts as covered, and absent attributions alone never
+    # uncover a session with complete per-call usage.
+    unaccounted = attributed_input > sums["input_tokens"] or (
+        attributed_output > sums["output_tokens"]
+    )
+    usage_covered = calls >= 1 and usage_missing == 0 and not unaccounted
     detail: dict[str, Any] = {
         **sums,
         "calls": calls,
         "model_completed_without_usage": usage_missing,
         "usageMissingCalls": usage_missing,
         "usageAbsentOptionalFields": sorted(absent_optional),
+        "usageCovered": usage_covered,
         "usageConsistency": (
             "match"
             if (
@@ -1490,15 +1501,23 @@ def usage_summary(
     ``uncoveredChildren``. Without an inventory the status is derived from
     the supplied records alone (None reads as ``missing-log``).
 
-    Returns ``{source, parent, children, total | null, coverage}`` where each
-    child is ``{id, kind, status: observed | no-usage-records | missing-log |
-    skipped-symlink | unusable | missing-child-dir, ...}``. A child whose
-    record parsed and simply contains no ``model_completed`` event is covered
-    with zero calls (``no-usage-records``); an explicitly supplied empty
-    record list without a retained record is uncovered. ``total`` is set only
-    when coverage is ``complete``; partial sums go under ``partialTotal``
-    with the uncovered children listed. Missing records are ``unknown``,
-    never zero; no dollar estimate is produced.
+    Returns ``{source, parent, children, total | null, coverage,
+    parentCovered}`` where each child is ``{id, kind, status: observed |
+    unknown-usage | incomplete-usage | missing-log | skipped-symlink |
+    unusable | missing-child-dir, ...}``. A retained inventory status of
+    ``observed`` means only that the record was retained and parsed; it does
+    not imply covered usage. A child whose record parsed but whose per-call
+    usage is not established (no ``model_completed`` event, a usage-missing
+    call, or positive provider attribution its per-call records do not
+    account for) is uncovered: ``unknown-usage`` when no complete per-call
+    record exists (absence of ``model_completed`` never proves zero model
+    calls), ``incomplete-usage`` when per-call records exist but leave usage
+    unaccounted. An explicitly supplied empty record list without a retained
+    record is uncovered. ``total`` is set only when coverage is ``complete``;
+    partial sums go under ``partialTotal`` with the uncovered children
+    listed. ``parentCovered`` is the parent-session counterpart of the
+    uncovered-children list. Missing records are ``unknown``, never zero; no
+    dollar estimate is produced.
     """
 
     parent_list = list(parent_records or [])
@@ -1521,9 +1540,11 @@ def usage_summary(
         total_sums[key] += parent.get(key, 0)
     total_calls += int(parent.get("calls", 0))
     uncovered: list[str] = []
-    # A model_completed event without a complete usage object is not covered
-    # usage (never zeros): any such event forces partial coverage.
-    incomplete_usage = int(parent.get("model_completed_without_usage", 0)) > 0
+    # The parent session is covered only when its own per-call usage is
+    # established; an unproven parent never yields a complete claim, and its
+    # state is reported via parentCovered (the parent counterpart of the
+    # uncovered-children list).
+    parent_covered = bool(parent.get("usageCovered"))
     for child_id in sorted(children_specs):
         kind = children_specs[child_id]
         raw = (child_records_by_id or {}).get(child_id)
@@ -1546,21 +1567,36 @@ def usage_summary(
             uncovered.append(child_id)
             continue
         sums, detail = _summarize_usage_records(list(raw))
-        status = "observed" if int(detail.get("calls", 0)) > 0 else "no-usage-records"
-        entry: dict[str, Any] = {"id": child_id, "kind": kind, "status": status}
+        if detail.get("usageCovered"):
+            entry = {"id": child_id, "kind": kind, "status": "observed"}
+            entry.update(detail)
+            children.append(entry)
+            for key in USAGE_KEYS:
+                total_sums[key] += sums[key]
+            total_calls += int(detail.get("calls", 0))
+            continue
+        # The record parsed but per-call usage is not established: this is
+        # unknown/unproven usage, never zero model calls. The entry keeps
+        # its diagnostics (attribution totals, per-call totals, call counts
+        # and the usageConsistency mismatch) while staying out of every
+        # total.
+        if int(detail.get("calls", 0)) > 0 or int(
+            detail.get("model_completed_without_usage", 0)
+        ) > 0:
+            status = "incomplete-usage"
+        else:
+            status = "unknown-usage"
+        entry = {"id": child_id, "kind": kind, "status": status}
         entry.update(detail)
         children.append(entry)
-        for key in USAGE_KEYS:
-            total_sums[key] += sums[key]
-        total_calls += int(detail.get("calls", 0))
-        if int(detail.get("model_completed_without_usage", 0)) > 0:
-            incomplete_usage = True
+        uncovered.append(child_id)
 
     total = {**total_sums, "calls": total_calls} if total_calls else None
-    observed_any = total_calls > 0 or any(
-        entry.get("status") in {"observed", "no-usage-records"} for entry in children
-    )
-    if uncovered or incomplete_usage:
+    # Partial vs unknown turns on whether any per-call usage was established
+    # at all (a partial sum exists), not on whether a session is fully
+    # covered: an uncovered parent with complete calls still sums alone.
+    observed_any = total_calls > 0
+    if uncovered or not parent_covered:
         uncovered = sorted(set(uncovered))
         if observed_any:
             coverage = "partial"
@@ -1572,9 +1608,10 @@ def usage_summary(
                 "partialTotal": {**total_sums, "calls": total_calls},
                 "uncoveredChildren": uncovered,
                 "coverage": coverage,
+                "parentCovered": parent_covered,
             }
         else:
-            # Nothing observed anywhere: unknown, never zero, with no
+            # Nothing covered anywhere: unknown, never zero, with no
             # partialTotal (a partial sum of nothing is still nothing).
             result = {
                 "source": "muse-session-record",
@@ -1583,6 +1620,7 @@ def usage_summary(
                 "total": None,
                 "uncoveredChildren": uncovered,
                 "coverage": "unknown",
+                "parentCovered": parent_covered,
             }
     elif total is None:
         result = {
@@ -1592,6 +1630,7 @@ def usage_summary(
             "total": None,
             "uncoveredChildren": [],
             "coverage": "unknown",
+            "parentCovered": parent_covered,
         }
     else:
         result = {
@@ -1600,6 +1639,7 @@ def usage_summary(
             "children": children,
             "total": total,
             "coverage": "complete",
+            "parentCovered": parent_covered,
         }
     return result
 

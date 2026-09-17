@@ -770,7 +770,10 @@ def _retained_attempt_records(
     where the inventory maps every expected child id (each
     ``subagent/<id>/`` entry plus every reminder-linked id) to ``observed`` |
     ``missing-log`` | ``skipped-symlink`` | ``unusable`` (empty, unparsable
-    or unreadable) | ``missing-child-dir``.
+    or unreadable) | ``missing-child-dir``. Here ``observed`` means only
+    that the record was retained and parsed; whether its usage is covered
+    is decided by ``usage_summary`` from the per-call records, never from
+    mere parseability.
     """
 
     parent_records, _ = _retained_log_records(
@@ -1168,6 +1171,10 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                     metadata["graderBoundaryFlags"] = sorted(
                         set(metadata["graderBoundaryFlags"]) | set(audit_flags)
                     )
+                # A complete claim requires established per-call usage for the
+                # parent and every child (usage_summary enforces this; a
+                # merely parseable record never counts). Anything else keeps
+                # tokenUsage absent and the candidate status below observed.
                 if usage.get("coverage") == "complete" and isinstance(usage.get("total"), dict):
                     total = usage["total"]
                     prompt_tokens = int(total.get("input_tokens", 0))

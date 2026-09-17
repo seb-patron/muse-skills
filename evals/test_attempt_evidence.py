@@ -874,8 +874,14 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(summary["parent"]["provider_reported_attributions"], 1)
         self.assertEqual(summary["parent"]["model_completed_input_tokens"], 10)
         self.assertEqual(summary["parent"]["attributed_input_tokens"], 999)
-        # The incremental source still sums once; the restatement adds nothing.
-        self.assertEqual(summary["total"]["input_tokens"], 10)
+        # The attribution reports 999 tokens the per-call records do not
+        # account for: coverage is partial with a null total, and the
+        # restatement still adds nothing to the partial sum.
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertFalse(summary["parentCovered"])
+        self.assertEqual(summary["partialTotal"]["input_tokens"], 10)
+        self.assertEqual(summary["partialTotal"]["calls"], 1)
 
     def test_child_usage_summed_separately(self):
         parent = [model_completed_event(self.usage(10, 5))]
@@ -965,16 +971,182 @@ class UsageTests(unittest.TestCase):
         )
 
     def test_parsed_child_without_model_calls_is_covered_zero(self):
-        # A parsed record with no model_completed event is supported evidence
-        # of no model call: covered with zero calls, not uncovered.
+        # Corrected semantics (the old name above is kept for continuity):
+        # a parsed record with no model_completed event is NOT evidence of
+        # no model call. The child is unknown/unproven usage, uncovered,
+        # with a null total -- absence of model_completed never proves zero
+        # model calls.
         parent = [model_completed_event(self.usage(10, 5))]
         children = {"quiet-child": [session_record({"kind": "terminal"})]}
         summary = attempt_evidence.usage_summary(parent, children, [])
         (child,) = summary["children"]
-        self.assertEqual(child["status"], "no-usage-records")
+        self.assertEqual(child["status"], "unknown-usage")
+        self.assertFalse(child["usageCovered"])
+        self.assertEqual(child["calls"], 0)
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertEqual(summary["uncoveredChildren"], ["quiet-child"])
+        # The parent's established per-call usage still sums alone.
+        self.assertEqual(summary["partialTotal"]["input_tokens"], 10)
+        self.assertEqual(summary["partialTotal"]["calls"], 1)
+
+    def test_child_positive_attribution_without_per_call_is_uncovered(self):
+        # The R27-3 residue counterexample: the child reports positive
+        # provider usage but its per-call record is unavailable. Coverage
+        # is partial with a null total; the child keeps its diagnostics
+        # (attribution totals, per-call totals, call counts, mismatch) and
+        # the attribution quantities never enter any total.
+        parent = [
+            model_completed_event(self.usage(10, 5)),
+            attribution_event(
+                "u1", "provider",
+                {"unit": "tokens", "reported": True, "input_tokens": 10,
+                 "output_tokens": 5, "cached_tokens": 0, "reasoning_tokens": 0,
+                 "main_llm_steps": 1},
+            ),
+        ]
+        children = {CHILD_ID: [attribution_event(
+            "u2", "provider",
+            {"unit": "tokens", "reported": True, "input_tokens": 7,
+             "output_tokens": 3, "cached_tokens": 0, "reasoning_tokens": 0,
+             "main_llm_steps": 1},
+        )]}
+        summary = attempt_evidence.usage_summary(
+            parent, children, [], {CHILD_ID: "observed"}
+        )
+        (child,) = summary["children"]
+        self.assertEqual(child["status"], "unknown-usage")
+        self.assertFalse(child["usageCovered"])
+        self.assertEqual(child["calls"], 0)
+        self.assertEqual(child["provider_reported_attributions"], 1)
+        self.assertEqual(child["attributed_input_tokens"], 7)
+        self.assertEqual(child["attributed_output_tokens"], 3)
+        self.assertEqual(child["model_completed_input_tokens"], 0)
+        self.assertEqual(child["usageConsistency"], "mismatch")
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertEqual(summary["uncoveredChildren"], [CHILD_ID])
+        self.assertTrue(summary["parentCovered"])
+        # Parent-only totals: the child's 7/3 never leak in.
+        self.assertEqual(summary["partialTotal"]["input_tokens"], 10)
+        self.assertEqual(summary["partialTotal"]["output_tokens"], 5)
+        self.assertEqual(summary["partialTotal"]["calls"], 1)
+
+    def test_marker_only_child_is_unknown_not_zero(self):
+        # A start/terminal marker parses but carries no per-call usage, so
+        # the child's usage is unproven: uncovered with a null total.
+        parent = [model_completed_event(self.usage(10, 5))]
+        children = {
+            "marker-child": [
+                session_record({"kind": "assistant_tool_calls_committed",
+                                "tool_calls": []}),
+                session_record({"kind": "terminal"}),
+            ]
+        }
+        summary = attempt_evidence.usage_summary(parent, children, [])
+        (child,) = summary["children"]
+        self.assertEqual(child["status"], "unknown-usage")
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertEqual(summary["uncoveredChildren"], ["marker-child"])
+
+    def test_arbitrary_json_child_is_unknown_not_zero(self):
+        # An arbitrary JSON object parses but is not a usage record at all.
+        parent = [model_completed_event(self.usage(10, 5))]
+        children = {"json-child": [{"whatever": [1, 2, 3]}]}
+        summary = attempt_evidence.usage_summary(parent, children, [])
+        (child,) = summary["children"]
+        self.assertEqual(child["status"], "unknown-usage")
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertEqual(summary["uncoveredChildren"], ["json-child"])
+
+    def test_parent_unaccounted_attribution_blocks_complete(self):
+        # The parent-shape twin of the child counterexample: provider
+        # attributions report more tokens than the parent's per-call
+        # records account for, so the parent is uncovered (parentCovered
+        # false) with a null total and preserved diagnostics.
+        parent = [
+            model_completed_event(self.usage(10, 5)),
+            attribution_event(
+                "u1", "provider",
+                {"unit": "tokens", "reported": True, "input_tokens": 10,
+                 "output_tokens": 5, "cached_tokens": 0, "reasoning_tokens": 0,
+                 "main_llm_steps": 1},
+            ),
+            attribution_event(
+                "u2", "provider",
+                {"unit": "tokens", "reported": True, "input_tokens": 7,
+                 "output_tokens": 3, "cached_tokens": 0, "reasoning_tokens": 0,
+                 "main_llm_steps": 1},
+            ),
+        ]
+        summary = attempt_evidence.usage_summary(parent, {}, [])
+        self.assertEqual(summary["parent"]["usageConsistency"], "mismatch")
+        self.assertEqual(summary["parent"]["attributed_input_tokens"], 17)
+        self.assertEqual(summary["parent"]["model_completed_input_tokens"], 10)
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertFalse(summary["parentCovered"])
+        self.assertEqual(summary["partialTotal"]["input_tokens"], 10)
+        self.assertEqual(summary["partialTotal"]["calls"], 1)
+
+    def test_parent_attribution_only_is_unknown(self):
+        # Positive attribution with no per-call records anywhere: nothing
+        # is covered, so unknown (never zero), with a null total.
+        parent = [attribution_event(
+            "u1", "provider",
+            {"unit": "tokens", "reported": True, "input_tokens": 7,
+             "output_tokens": 3, "cached_tokens": 0, "reasoning_tokens": 0,
+             "main_llm_steps": 1},
+        )]
+        summary = attempt_evidence.usage_summary(parent, {}, [])
+        self.assertEqual(summary["coverage"], "unknown")
+        self.assertIsNone(summary["total"])
+        self.assertNotIn("partialTotal", summary)
+        self.assertFalse(summary["parentCovered"])
+
+    def test_child_calls_with_unaccounted_attribution_are_incomplete(self):
+        # Per-call records exist but leave attribution tokens unaccounted:
+        # incomplete usage, uncovered, diagnostics preserved.
+        parent = [model_completed_event(self.usage(10, 5))]
+        children = {CHILD_ID: [
+            model_completed_event(self.usage(4, 2)),
+            attribution_event(
+                "u9", "provider",
+                {"unit": "tokens", "reported": True, "input_tokens": 40,
+                 "output_tokens": 20, "cached_tokens": 0,
+                 "reasoning_tokens": 0, "main_llm_steps": 1},
+            ),
+        ]}
+        summary = attempt_evidence.usage_summary(parent, children, [])
+        (child,) = summary["children"]
+        self.assertEqual(child["status"], "incomplete-usage")
+        self.assertFalse(child["usageCovered"])
+        self.assertEqual(child["calls"], 1)
+        self.assertEqual(child["usageConsistency"], "mismatch")
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertEqual(summary["uncoveredChildren"], [CHILD_ID])
+
+    def test_complete_parent_plus_child_without_attributions(self):
+        # Preserved good case: valid parent-plus-child per-call usage with
+        # no attribution records at all still yields a real complete total.
+        parent = [model_completed_event(
+            {"input_tokens": 10, "output_tokens": 5})]
+        children = {CHILD_ID: [model_completed_event(
+            {"input_tokens": 4, "output_tokens": 2})]}
+        summary = attempt_evidence.usage_summary(parent, children, [])
+        self.assertTrue(summary["parentCovered"])
+        (child,) = summary["children"]
+        self.assertEqual(child["status"], "observed")
+        self.assertTrue(child["usageCovered"])
         self.assertEqual(summary["coverage"], "complete")
-        self.assertEqual(summary["total"]["input_tokens"], 10)
-        self.assertEqual(summary["total"]["calls"], 1)
+        self.assertEqual(summary["total"]["input_tokens"], 14)
+        self.assertEqual(summary["total"]["output_tokens"], 7)
+        self.assertEqual(summary["total"]["calls"], 2)
+        self.assertNotIn("partialTotal", summary)
+        self.assertNotIn("uncoveredChildren", summary)
 
     def test_empty_usage_object_is_uncovered_call_never_zero(self):
         parent = [
@@ -1621,6 +1793,127 @@ class ProviderAttemptTests(unittest.TestCase):
         self.assertNotIn("tokenUsage", response)
         self.assertEqual(metadata["candidateTokenStatus"], "partial")
         self.assertNotEqual(metadata["candidateTokenStatus"], "observed")
+
+    def test_attribution_only_child_omits_tokens_through_call_api(self):
+        stdout = self.completed_stream()
+        parent = [
+            model_completed_event(
+                {"input_tokens": 10, "output_tokens": 5, "cached_tokens": 0,
+                 "cache_write_tokens": 0, "cache_read_tokens": 0,
+                 "reasoning_tokens": 0}
+            ),
+            attribution_event(
+                "u1", "provider",
+                {"unit": "tokens", "reported": True, "input_tokens": 10,
+                 "output_tokens": 5, "cached_tokens": 0, "reasoning_tokens": 0,
+                 "main_llm_steps": 1},
+            ),
+        ]
+        child = [attribution_event(
+            "u2", "provider",
+            {"unit": "tokens", "reported": True, "input_tokens": 7,
+             "output_tokens": 3, "cached_tokens": 0, "reasoning_tokens": 0,
+             "main_llm_steps": 1},
+        )]
+        self.make_session(records=parent, children=[(CHILD_ID, child)])
+        response, _ = self.call(stdout)
+        self.assertNotIn("error", response)
+        metadata = response["metadata"]
+        # The child log was retained and parsed, so evidence is retained;
+        # only the usage fix blocks the complete claim here.
+        self.assertEqual(metadata["evidenceStatus"], "retained")
+        usage = metadata["museUsage"]
+        self.assertEqual(usage["coverage"], "partial")
+        self.assertIsNone(usage["total"])
+        self.assertEqual(usage["uncoveredChildren"], [CHILD_ID])
+        self.assertEqual(usage["partialTotal"]["input_tokens"], 10)
+        self.assertNotIn("tokenUsage", response)
+        self.assertIsNone(response["metadata"].get("museTokenUsage"))
+        self.assertEqual(metadata["candidateTokenStatus"], "partial")
+        self.assertNotEqual(metadata["candidateTokenStatus"], "observed")
+
+    def test_marker_only_child_omits_tokens_through_call_api(self):
+        stdout = self.completed_stream()
+        parent = [
+            model_completed_event(
+                {"input_tokens": 10, "output_tokens": 5, "cached_tokens": 0,
+                 "cache_write_tokens": 0, "cache_read_tokens": 0,
+                 "reasoning_tokens": 0}
+            ),
+        ]
+        child = [session_record({"kind": "terminal"})]
+        self.make_session(records=parent, children=[(CHILD_ID, child)])
+        response, _ = self.call(stdout)
+        self.assertNotIn("error", response)
+        metadata = response["metadata"]
+        self.assertEqual(metadata["evidenceStatus"], "retained")
+        usage = metadata["museUsage"]
+        self.assertEqual(usage["coverage"], "partial")
+        self.assertIsNone(usage["total"])
+        self.assertEqual(usage["uncoveredChildren"], [CHILD_ID])
+        self.assertNotIn("tokenUsage", response)
+        self.assertEqual(metadata["candidateTokenStatus"], "partial")
+        self.assertNotEqual(metadata["candidateTokenStatus"], "observed")
+
+    def test_parent_unaccounted_attribution_omits_tokens_through_call_api(self):
+        stdout = self.completed_stream()
+        records = [
+            model_completed_event(
+                {"input_tokens": 10, "output_tokens": 5, "cached_tokens": 0,
+                 "cache_write_tokens": 0, "cache_read_tokens": 0,
+                 "reasoning_tokens": 0}
+            ),
+            attribution_event(
+                "u1", "provider",
+                {"unit": "tokens", "reported": True, "input_tokens": 10,
+                 "output_tokens": 5, "cached_tokens": 0, "reasoning_tokens": 0,
+                 "main_llm_steps": 1},
+            ),
+            attribution_event(
+                "u2", "provider",
+                {"unit": "tokens", "reported": True, "input_tokens": 7,
+                 "output_tokens": 3, "cached_tokens": 0, "reasoning_tokens": 0,
+                 "main_llm_steps": 1},
+            ),
+        ]
+        response, _ = self.call(stdout, session_records=records)
+        self.assertNotIn("error", response)
+        metadata = response["metadata"]
+        usage = metadata["museUsage"]
+        self.assertEqual(usage["coverage"], "partial")
+        self.assertIsNone(usage["total"])
+        self.assertFalse(usage["parentCovered"])
+        self.assertNotIn("tokenUsage", response)
+        self.assertEqual(metadata["candidateTokenStatus"], "partial")
+        self.assertNotEqual(metadata["candidateTokenStatus"], "observed")
+
+    def test_complete_usage_observed_through_call_api(self):
+        stdout = self.completed_stream()
+        parent = [
+            model_completed_event(
+                {"input_tokens": 10, "output_tokens": 5, "cached_tokens": 0,
+                 "cache_write_tokens": 0, "cache_read_tokens": 0,
+                 "reasoning_tokens": 0}
+            ),
+        ]
+        child = [model_completed_event(
+            {"input_tokens": 4, "output_tokens": 2, "cached_tokens": 0,
+             "cache_write_tokens": 0, "cache_read_tokens": 0,
+             "reasoning_tokens": 0}
+        )]
+        self.make_session(records=parent, children=[(CHILD_ID, child)])
+        response, _ = self.call(stdout)
+        self.assertNotIn("error", response)
+        metadata = response["metadata"]
+        self.assertEqual(metadata["evidenceStatus"], "retained")
+        usage = metadata["museUsage"]
+        self.assertEqual(usage["coverage"], "complete")
+        self.assertEqual(usage["total"]["input_tokens"], 14)
+        self.assertEqual(usage["total"]["output_tokens"], 7)
+        self.assertEqual(usage["total"]["calls"], 2)
+        self.assertEqual(metadata["candidateTokenStatus"], "observed")
+        self.assertIn("tokenUsage", response)
+        self.assertEqual(response["tokenUsage"]["total"], 21)
 
     def test_attempt_integrity_ledger_status_requires_ok(self):
         good = {"metadata": {"completionStatus": "completed",
