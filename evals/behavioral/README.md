@@ -203,6 +203,22 @@ requires separate live and private-source authorization.
 Do not mix v2 and v3 aggregate recall directly because the corrected low finding
 changes the approval-control recall denominator.
 
+## Attempt evidence and accounting
+
+Each managed attempt gets an `attemptId`, per-attempt `scratch/` (`TMPDIR`,
+recorded as `per-attempt-tmpdir` with proof `none`), a retained copy under
+`<trace dir>/evidence/<attemptId>/manifest.json`, ledger lines in
+`<trace dir>/attempts.jsonl`, a `<output>.schedule.json` reservation, a
+`<output>.accounting-v1.json` (`muse-attempt-accounting-v1`) covering every
+scheduled slot, and an owner-adjudicated readout (`muse-adjudicated-readout-v1`).
+Session records resolve via `muse_sessions_root` / `MUSE_EVAL_SESSIONS_ROOT`
+(default `~/.local/share/muse/sessions`); retention caps at 2000 files / 64 MiB
+as explicit gaps. Limits of the method: `TMPDIR` is not isolation; the
+command/tool scan is a heuristic, never proof; usage is per-call
+session-record data with explicit coverage (`complete`/`partial`/`unknown`,
+never zero, no cost estimate); readout key maps and adjudications are
+owner files — only synthetic examples are committed.
+
 ## Add a case
 
 Add a row to `cases/review_cases.yaml` with immutable base/head SHAs, an author

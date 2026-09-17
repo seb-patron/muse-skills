@@ -333,17 +333,519 @@ def normalize(payload: Mapping[str, Any], grading: str = "rubric") -> dict[str, 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Normalize raw Promptfoo spike results")
-    parser.add_argument("--input", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--input", type=Path, default=None)
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--grading", choices=sorted(GRADING_MODES), default="rubric")
+    parser.add_argument("--schedule", type=Path, default=None)
+    parser.add_argument("--ledger", type=Path, default=None)
+    parser.add_argument("--accounting-output", type=Path, default=None)
     args = parser.parse_args()
-    payload = json.loads(args.input.read_text(encoding="utf-8"))
-    result = normalize(payload, args.grading)
+    if args.accounting_output is not None and args.schedule is None:
+        parser.error("--accounting-output requires --schedule")
+    if args.output is None and args.accounting_output is None:
+        parser.error("nothing to do: pass --output and/or --accounting-output")
+    if args.accounting_output is not None:
+        schedule = json.loads(args.schedule.read_text(encoding="utf-8"))
+        ledger_lines: list[dict[str, Any]] = []
+        if args.ledger is not None and args.ledger.exists():
+            for line in args.ledger.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    ledger_lines.append(record)
+        payload = None
+        if args.input is not None and args.input.exists():
+            payload = json.loads(args.input.read_text(encoding="utf-8"))
+        accounting = account_attempts(schedule, ledger_lines, payload)
+        args.accounting_output.parent.mkdir(parents=True, exist_ok=True)
+        args.accounting_output.write_text(
+            json.dumps(accounting, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        print(
+            f"accounted {len(accounting['accounting']['slots'])} scheduled slots "
+            f"with {ACCOUNTING_ID}"
+        )
+    if args.output is not None:
+        if args.input is None:
+            parser.error("--output requires --input")
+        payload = json.loads(args.input.read_text(encoding="utf-8"))
+        result = normalize(payload, args.grading)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"normalized {len(result['rows'])} Promptfoo rows with {NORMALIZATION_ID}")
+    return 0
+
+
+ACCOUNTING_ID = "muse-attempt-accounting-v1"
+READOUT_ID = "muse-adjudicated-readout-v1"
+
+CONSEQUENTIAL_SEVERITIES = {"blocking", "should-fix"}
+READOUT_SEVERITIES = {"blocking", "should-fix", "low"}
+ADJUDICATION_DECISIONS = {"cleared", "confirmed-exposure", "excluded"}
+FINDING_STATUSES = {"matched", "novel-valid", "unsupported", "duplicate", "out-of-scope"}
+
+
+def _raw_promptfoo_rows(payload: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(payload, Mapping):
+        return []
+    inner = payload.get("results") if isinstance(payload.get("results"), Mapping) else payload
+    raw_rows = inner.get("results") if isinstance(inner, Mapping) else None
+    if not isinstance(raw_rows, list):
+        return []
+    return [row for row in raw_rows if isinstance(row, Mapping)]
+
+
+def _row_label(row: Mapping[str, Any]) -> str | None:
+    provider = row.get("provider")
+    if isinstance(provider, Mapping) and isinstance(provider.get("label"), str):
+        return provider["label"]
+    return None
+
+
+def _row_case(row: Mapping[str, Any]) -> str | None:
+    metadata = row.get("metadata")
+    if isinstance(metadata, Mapping) and isinstance(metadata.get("case_id"), str):
+        return metadata["case_id"]
+    return None
+
+
+def _row_attempt_id(row: Mapping[str, Any]) -> str | None:
+    response = row.get("response")
+    metadata = response.get("metadata") if isinstance(response, Mapping) else None
+    if isinstance(metadata, Mapping):
+        attempt = metadata.get("attemptId")
+        if isinstance(attempt, str) and attempt:
+            return attempt
+    return None
+
+
+def _row_completion_status(row: Mapping[str, Any]) -> str | None:
+    response = row.get("response")
+    metadata = response.get("metadata") if isinstance(response, Mapping) else None
+    if isinstance(metadata, Mapping):
+        status = metadata.get("completionStatus")
+        if isinstance(status, str) and status:
+            return status
+    return None
+
+
+def _ledger_index(
+    ledger_lines: Iterable[Mapping[str, Any]],
+) -> dict[tuple[str, str, str], list[Mapping[str, Any]]]:
+    index: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
+    for line in ledger_lines:
+        if not isinstance(line, Mapping):
+            continue
+        key = line.get("scheduleKey")
+        if not isinstance(key, str) or not key:
+            continue
+        parts = key.split("|")
+        if len(parts) != 3:
+            continue
+        index.setdefault((parts[0], parts[1], parts[2]), []).append(line)
+    return index
+
+
+def account_attempts(
+    schedule: Mapping[str, Any],
+    ledger_lines: Iterable[Mapping[str, Any]] | None,
+    promptfoo_payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Account for every scheduled attempt of a review batch.
+
+    ``schedule`` is ``{"stage", "providers": [...], "cases": [...],
+    "repeat": n}``. Every scheduled slot (provider x case x repeat) is listed
+    with status ``completed``, ``error:<completionStatus or message>``,
+    ``quarantined`` (row completed but flagged), ``missing`` (no row and no
+    ledger record), ``started-not-finished`` or ``unscheduled-extra`` (row not
+    in schedule). Original deterministic flags travel verbatim; nothing is
+    dropped. Totals count every status.
+    """
+
+    providers = list(schedule.get("providers") or [])
+    cases = list(schedule.get("cases") or [])
+    repeat = schedule.get("repeat", 1)
+    repeat = repeat if isinstance(repeat, int) and repeat >= 1 else 1
+    raw_rows = _raw_promptfoo_rows(promptfoo_payload)
+    converted: list[dict[str, Any]] = []
+    if raw_rows:
+        try:
+            converted = promptfoo_rows({"results": {"results": list(raw_rows)}}, "deterministic")
+        except ValueError:
+            converted = []
+    grouped: dict[tuple[str, str], list[int]] = {}
+    for index, row in enumerate(raw_rows):
+        grouped.setdefault((_row_label(row) or "", _row_case(row) or ""), []).append(index)
+    ledger = _ledger_index(ledger_lines or [])
+    slots: list[dict[str, Any]] = []
+    extras: list[dict[str, Any]] = []
+    consumed: set[int] = set()
+    for provider in providers:
+        for case in cases:
+            for position in range(repeat):
+                key = (provider, case)
+                indices = grouped.get(key, [])
+                row_index = indices[position] if position < len(indices) else None
+                records = ledger.get((provider, case, str(position)), [])
+                if not records:
+                    records = ledger.get((provider, case, "null"), [])
+                phases = {str(line.get("phase")) for line in records if isinstance(line, Mapping)}
+                ledger_attempt = next(
+                    (
+                        str(line.get("attemptId"))
+                        for line in records
+                        if isinstance(line, Mapping) and line.get("attemptId")
+                    ),
+                    None,
+                )
+                if row_index is None:
+                    if "finished" in phases:
+                        status = "missing"
+                    elif "started" in phases:
+                        status = "started-not-finished"
+                    else:
+                        status = "missing"
+                    slots.append(
+                        {
+                            "provider": provider,
+                            "case": case,
+                            "repeat": position,
+                            "status": status,
+                            "attemptId": ledger_attempt,
+                            "ledgerPhase": "finished" if "finished" in phases else (
+                                "started" if "started" in phases else None
+                            ),
+                            "deterministic": None,
+                            "flags": None,
+                            "error": None,
+                            "completion": False,
+                        }
+                    )
+                    continue
+                consumed.add(row_index)
+                row = raw_rows[row_index]
+                facts = converted[row_index] if row_index < len(converted) else {}
+                error_text = facts.get("error") if isinstance(facts, Mapping) else None
+                quarantined = bool(facts.get("quarantined")) if isinstance(facts, Mapping) else False
+                completion_status = _row_completion_status(row)
+                if error_text or not (facts.get("completion") if isinstance(facts, Mapping) else False):
+                    message = completion_status or error_text or "unknown"
+                    status = f"error:{message}"
+                elif quarantined:
+                    status = "quarantined"
+                else:
+                    status = "completed"
+                slots.append(
+                    {
+                        "provider": provider,
+                        "case": case,
+                        "repeat": position,
+                        "status": status,
+                        "attemptId": _row_attempt_id(row) or ledger_attempt,
+                        "ledgerPhase": "finished" if "finished" in phases else (
+                            "started" if "started" in phases else None
+                        ),
+                        "deterministic": facts if isinstance(facts, Mapping) else None,
+                        "flags": facts.get("grader_boundary_flags") if isinstance(facts, Mapping) else None,
+                        "error": error_text if isinstance(facts, Mapping) else None,
+                        "completion": bool(facts.get("completion")) if isinstance(facts, Mapping) else False,
+                    }
+                )
+    for (provider, case), indices in grouped.items():
+        expected = repeat if provider in providers and case in cases else 0
+        for position, row_index in enumerate(indices):
+            if row_index in consumed:
+                continue
+            row = raw_rows[row_index]
+            facts = converted[row_index] if row_index < len(converted) else {}
+            extras.append(
+                {
+                    "provider": provider or None,
+                    "case": case or None,
+                    "repeat": position,
+                    "status": "unscheduled-extra",
+                    "attemptId": _row_attempt_id(row),
+                    "ledgerPhase": None,
+                    "deterministic": facts if isinstance(facts, Mapping) else None,
+                    "flags": facts.get("grader_boundary_flags") if isinstance(facts, Mapping) else None,
+                    "error": facts.get("error") if isinstance(facts, Mapping) else None,
+                    "completion": bool(facts.get("completion")) if isinstance(facts, Mapping) else False,
+                }
+            )
+    totals: dict[str, int] = {}
+    for entry in (*slots, *extras):
+        totals[entry["status"]] = totals.get(entry["status"], 0) + 1
+    ledger_count = sum(1 for line in (ledger_lines or []) if isinstance(line, Mapping))
+    return {
+        "accounting": {
+            "id": ACCOUNTING_ID,
+            "stage": schedule.get("stage"),
+            "schedule": {
+                "stage": schedule.get("stage"),
+                "providers": providers,
+                "cases": cases,
+                "repeat": repeat,
+            },
+            "slots": slots,
+            "extras": extras,
+            "totals": totals,
+            "ledgerLines": ledger_count,
+            "rows": len(raw_rows),
+        }
+    }
+
+
+def _validate_key_map(key_map: Mapping[str, Any]) -> None:
+    cases = key_map.get("cases")
+    if not isinstance(cases, Mapping):
+        raise ValueError("key map has no cases object")
+    for case_id, case in cases.items():
+        if not isinstance(case, Mapping):
+            raise ValueError(f"key map case {case_id!r} is not an object")
+        for finding in case.get("findings", []):
+            severity = finding.get("severity") if isinstance(finding, Mapping) else None
+            if severity not in READOUT_SEVERITIES:
+                raise ValueError(
+                    f"key map case {case_id!r} has invalid severity {severity!r}"
+                )
+
+
+def _validate_adjudication(adjudication: Mapping[str, Any]) -> None:
+    attempts = adjudication.get("attempts")
+    if not isinstance(attempts, Mapping):
+        raise ValueError("adjudication has no attempts object")
+    for attempt_id, decision in attempts.items():
+        if not isinstance(decision, Mapping):
+            raise ValueError(f"adjudication attempt {attempt_id!r} is not an object")
+        quarantine = decision.get("quarantine")
+        if quarantine is not None and quarantine not in ADJUDICATION_DECISIONS:
+            raise ValueError(
+                f"adjudication attempt {attempt_id!r} has invalid quarantine {quarantine!r}"
+            )
+        for finding in decision.get("findings", []):
+            if not isinstance(finding, Mapping):
+                raise ValueError(f"adjudication attempt {attempt_id!r} has a finding that is not an object")
+            if finding.get("status") not in FINDING_STATUSES:
+                raise ValueError(
+                    f"adjudication attempt {attempt_id!r} has invalid finding status "
+                    f"{finding.get('status')!r}"
+                )
+
+
+def adjudicated_readout(
+    accounting: Mapping[str, Any],
+    key_map: Mapping[str, Any],
+    adjudication: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Combine attempt accounting with the owner key map and adjudication.
+
+    Per attempt the ``deterministic`` facts stay verbatim (including the
+    original quarantine flag and error) next to the ``adjudicated`` outcome. A
+    ``cleared`` decision sets ``eligible`` without editing the original flag;
+    ``confirmed-exposure`` and ``excluded`` make the attempt ineligible, as
+    does any incomplete attempt (counted as no useful delivery, never as a
+    semantic miss or approval). Consequential findings are ``blocking`` and
+    ``should-fix``; ``low`` matches never enter recall. Aggregates are
+    reported per provider.
+    """
+
+    _validate_key_map(key_map)
+    _validate_adjudication(adjudication)
+    inner = accounting.get("accounting") if isinstance(accounting.get("accounting"), Mapping) else accounting
+    slots = inner.get("slots") if isinstance(inner, Mapping) else None
+    slot_list = list(slots) if isinstance(slots, list) else []
+    key_cases = key_map.get("cases") if isinstance(key_map.get("cases"), Mapping) else {}
+    owner_attempts = adjudication.get("attempts") if isinstance(adjudication.get("attempts"), Mapping) else {}
+
+    def consequential_key_ids(case_id: Any) -> set[str]:
+        case = key_cases.get(case_id)
+        if not isinstance(case, Mapping):
+            return set()
+        ids: set[str] = set()
+        for finding in case.get("findings", []):
+            if not isinstance(finding, Mapping):
+                continue
+            if finding.get("severity") in CONSEQUENTIAL_SEVERITIES and isinstance(finding.get("id"), str):
+                ids.add(finding["id"])
+        return ids
+
+    def key_severity(case_id: Any, key_id: Any) -> str | None:
+        case = key_cases.get(case_id)
+        if not isinstance(case, Mapping):
+            return None
+        for finding in case.get("findings", []):
+            if isinstance(finding, Mapping) and finding.get("id") == key_id:
+                severity = finding.get("severity")
+                return severity if isinstance(severity, str) else None
+        return None
+
+    attempts: list[dict[str, Any]] = []
+    for slot in slot_list:
+        if not isinstance(slot, Mapping):
+            continue
+        provider = slot.get("provider")
+        case_id = slot.get("case")
+        status = slot.get("status")
+        attempt_id = slot.get("attemptId")
+        deterministic = slot.get("deterministic")
+        owner = owner_attempts.get(attempt_id) if isinstance(attempt_id, str) else None
+        owner = owner if isinstance(owner, Mapping) else None
+        quarantine = owner.get("quarantine") if owner else None
+        owner_findings = owner.get("findings", []) if owner else []
+        owner_findings = owner_findings if isinstance(owner_findings, list) else []
+        complete = status in {"completed", "quarantined"}
+        if not complete:
+            eligible = False
+            ineligible_reason = "incomplete"
+        elif quarantine in {"confirmed-exposure", "excluded"}:
+            eligible = False
+            ineligible_reason = quarantine
+        elif status == "quarantined" and quarantine != "cleared":
+            eligible = False
+            ineligible_reason = "quarantine-pending"
+        else:
+            eligible = True
+            ineligible_reason = None
+        key_ids = consequential_key_ids(case_id)
+        matched = 0
+        optional_low_matched = 0
+        novel_valid = 0
+        unsupported = 0
+        novel_valid_consequential = False
+        for finding in owner_findings:
+            if not isinstance(finding, Mapping):
+                continue
+            finding_status = finding.get("status")
+            severity = key_severity(case_id, finding.get("key_id"))
+            if severity is None and isinstance(finding.get("severity"), str):
+                severity = finding["severity"]
+            if finding_status == "matched":
+                if severity in CONSEQUENTIAL_SEVERITIES:
+                    matched += 1
+                elif severity == "low":
+                    optional_low_matched += 1
+            elif finding_status == "novel-valid":
+                novel_valid += 1
+                if severity in CONSEQUENTIAL_SEVERITIES:
+                    novel_valid_consequential = True
+            elif finding_status == "unsupported":
+                unsupported += 1
+        recall = (matched / len(key_ids)) if (eligible and key_ids) else None
+        case = key_cases.get(case_id) if isinstance(key_cases, Mapping) else None
+        expected = case.get("expected_verdict") if isinstance(case, Mapping) else None
+        actual = deterministic.get("actual_verdict") if isinstance(deterministic, Mapping) else None
+        false_approval = bool(eligible and expected == "NEEDS_FIXES" and actual == "APPROVE")
+        false_block = bool(
+            eligible
+            and expected == "APPROVE"
+            and actual == "NEEDS_FIXES"
+            and not novel_valid_consequential
+        )
+        attempts.append(
+            {
+                "provider": provider,
+                "case": case_id,
+                "repeat": slot.get("repeat"),
+                "attemptId": attempt_id,
+                "status": status,
+                "eligible": eligible,
+                "ineligible_reason": ineligible_reason,
+                "deterministic": deterministic,
+                "adjudicated": {
+                    "quarantine": quarantine,
+                    "matched_consequential": matched if eligible else 0,
+                    "consequential_recall": recall,
+                    "optional_low_matched": optional_low_matched if eligible else 0,
+                    "novel_valid": novel_valid if eligible else 0,
+                    "unsupported": unsupported if eligible else 0,
+                    "false_approval": false_approval,
+                    "false_block": false_block,
+                },
+            }
+        )
+    providers: dict[str, Any] = {}
+    scheduled = inner.get("schedule") if isinstance(inner, Mapping) else None
+    provider_names = scheduled.get("providers") if isinstance(scheduled, Mapping) else None
+    provider_names = list(provider_names) if isinstance(provider_names, list) else sorted(
+        {str(entry.get("provider")) for entry in attempts}
+    )
+    for provider in provider_names:
+        owned = [entry for entry in attempts if entry.get("provider") == provider]
+        eligible_entries = [entry for entry in owned if entry.get("eligible")]
+        recalls = [
+            entry["adjudicated"]["consequential_recall"]
+            for entry in eligible_entries
+            if isinstance(entry["adjudicated"].get("consequential_recall"), (int, float))
+        ]
+        matched_total = sum(
+            int(entry["adjudicated"].get("matched_consequential", 0)) for entry in owned
+        )
+        key_total = sum(len(consequential_key_ids(entry.get("case"))) for entry in owned)
+        decisions: dict[str, int] = {}
+        for entry in owned:
+            attempt_id = entry.get("attemptId")
+            owner = owner_attempts.get(attempt_id) if isinstance(attempt_id, str) else None
+            decision = owner.get("quarantine") if isinstance(owner, Mapping) else None
+            if entry.get("status") == "quarantined" or decision in ADJUDICATION_DECISIONS:
+                decisions[str(decision)] = decisions.get(str(decision), 0) + 1
+        providers[str(provider)] = {
+            "eligible_attempts": len(eligible_entries),
+            "scheduled_attempts": len(owned),
+            "completed_review_recall": (sum(recalls) / len(recalls)) if recalls else None,
+            "useful_delivery": (matched_total / key_total) if key_total else None,
+            "false_approvals": sum(1 for entry in eligible_entries if entry["adjudicated"].get("false_approval")),
+            "false_blocks": sum(1 for entry in eligible_entries if entry["adjudicated"].get("false_block")),
+            "novel_valid": sum(int(entry["adjudicated"].get("novel_valid", 0)) for entry in eligible_entries),
+            "unsupported": sum(int(entry["adjudicated"].get("unsupported", 0)) for entry in eligible_entries),
+            "exclusions": sum(
+                1 for entry in owned if entry.get("ineligible_reason") in {"confirmed-exposure", "excluded"}
+            ),
+            "quarantines_by_decision": decisions,
+        }
+    return {
+        "readout": {
+            "id": READOUT_ID,
+            "key_id": key_map.get("key_id"),
+            "key_sha256": key_map.get("key_sha256"),
+            "adjudication_id": adjudication.get("adjudication_id"),
+            "decided_by": adjudication.get("decided_by"),
+            "attempts": attempts,
+            "providers": providers,
+        }
+    }
+
+
+def readout_main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Render the adjudicated readout")
+    parser.add_argument("--accounting", required=True, type=Path)
+    parser.add_argument("--key-map", required=True, type=Path)
+    parser.add_argument("--adjudication", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    args = parser.parse_args(argv)
+    if args.output.exists():
+        print(f"refuses to overwrite existing output: {args.output}", flush=True)
+        return 1
+    try:
+        accounting = json.loads(args.accounting.read_text(encoding="utf-8"))
+        key_map = json.loads(args.key_map.read_text(encoding="utf-8"))
+        adjudication = json.loads(args.adjudication.read_text(encoding="utf-8"))
+        result = adjudicated_readout(accounting, key_map, adjudication)
+    except (OSError, ValueError) as exc:
+        print(f"readout failed: {exc}", flush=True)
+        return 1
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"normalized {len(result['rows'])} Promptfoo rows with {NORMALIZATION_ID}")
+    print(f"wrote adjudicated readout {READOUT_ID} to {args.output}")
     return 0
 
 
 if __name__ == "__main__":
+    import sys as _sys
+
+    if len(_sys.argv) > 1 and _sys.argv[1] == "readout":
+        raise SystemExit(readout_main(_sys.argv[2:]))
     raise SystemExit(main())

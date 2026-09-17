@@ -128,21 +128,39 @@ class BehavioralProviderTests(unittest.TestCase):
         (self.repo / relative).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(experiment.ROOT / relative, self.repo / relative)
         seen = {}
+        # Synthetic session record the fake stream points at, so managed-run
+        # evidence retention succeeds and the row is auditable.
+        self.session_id = "11111111-2222-3333-4444-555555555555"
+        sessions_root = Path(self.temp.name) / "sessions"
+        session_dir = sessions_root / "2026" / "09" / "16" / self.session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "session.jsonl").write_text("{}\n", encoding="utf-8")
+
+        def envelop(events):
+            return [
+                {**event, "stream": {"kind": "session", "id": self.session_id}}
+                for event in events
+            ]
 
         def fake_run(args, workspace, timeout_seconds, env):
             seen["workspace"] = workspace
             seen["args"] = args
-            events = [
+            seen["env"] = dict(env)
+            review = json.dumps({"verdict": "APPROVE", "head_sha": self.head})
+            events = envelop([
                 {"payload_type": "run.started", "payload": {"model": "muse-spark-1.3-contributor"}},
                 {"payload_type": "agent.skill_read.observed", "payload": {"skill_id": "example"}},
                 *trace_for_workspace(workspace),
-                {"payload_type": "run.terminal.completed", "payload": {"text": '{"verdict": "APPROVE"}'}},
-            ]
+                {"payload_type": "run.terminal.completed", "payload": {"text": review}},
+            ])
             return subprocess.CompletedProcess(args, 0, "\n".join(json.dumps(e) for e in events), "")
 
         config_extra = {"workspace_parent": str(outside)} if workspace_parent else {}
         with mock.patch.object(muse_provider, "_prepare_workspace", return_value=(self.base, self.head)), \
-                mock.patch.dict(os.environ, {"MUSE_EVAL_TRACE_DIR": str(self.trace_dir)}):
+                mock.patch.dict(os.environ, {
+                    "MUSE_EVAL_TRACE_DIR": str(self.trace_dir),
+                    "MUSE_EVAL_SESSIONS_ROOT": str(sessions_root),
+                }):
             with mock.patch.object(muse_provider.shutil, "which", return_value="/usr/bin/muse"):
                 with mock.patch.object(muse_provider, "_run_muse", side_effect=run or fake_run):
                     response = muse_provider.call_api(
@@ -240,7 +258,14 @@ class BehavioralProviderTests(unittest.TestCase):
         response, _ = self._call_screen_provider(lambda w: [], workspace_parent=True, run=timeout)
         self.assertIn("timed out", response["error"])
         self.assertEqual(response["metadata"]["termination"], "timeout")
-        self.assertEqual(response["metadata"]["graderBoundaryFlags"], ["gold_findings"])
+        self.assertEqual(response["metadata"]["completionStatus"], "timeout")
+        # The timed-out partial stream carries no session record, so the row
+        # is quarantined as unevaluable evidence instead of being approved.
+        self.assertEqual(
+            response["metadata"]["graderBoundaryFlags"],
+            ["evidence-unavailable", "gold_findings"],
+        )
+        self.assertEqual(response["metadata"]["evidenceStatus"], "not-retained")
         self.assertEqual(response["metadata"]["traceStatus"], "retained")
 
     def test_command_scan_matches_real_muse_tool_result_shape(self):
@@ -535,7 +560,7 @@ class BehavioralProviderTests(unittest.TestCase):
     def test_ordinary_muse_baseline_can_use_environment_model_override(self):
         output = json.dumps({
             "payload_type": "run.terminal.completed",
-            "payload": {"text": "{}"},
+            "payload": {"text": json.dumps({"verdict": "APPROVE", "head_sha": self.head})},
         })
         with mock.patch.object(muse_provider, "_prepare_workspace", return_value=(self.base, self.head)):
             with mock.patch.object(muse_provider.shutil, "which", return_value="/usr/bin/muse"):
@@ -1366,6 +1391,8 @@ class SpikeValidationTests(unittest.TestCase):
                 Path(f"{output}.reservation.json"),
                 Path(f"{output}.promptfoo"),
                 Path(f"{output}.traces"),
+                Path(f"{output}.schedule.json"),
+                Path(f"{output}.accounting-v1.json"),
             ]
             output.parent.mkdir(parents=True, exist_ok=True)
             for artifact in artifacts:
@@ -1431,13 +1458,16 @@ class SpikeValidationTests(unittest.TestCase):
                 output.unlink(missing_ok=True)
                 metrics.unlink(missing_ok=True)
                 reservation.unlink(missing_ok=True)
+                Path(f"{output}.schedule.json").unlink(missing_ok=True)
+                Path(f"{output}.accounting-v1.json").unlink(missing_ok=True)
                 shutil.rmtree(cache, ignore_errors=True)
                 shutil.rmtree(Path(f"{output}.traces"), ignore_errors=True)
 
     def test_screen_runner_sets_private_traces_and_outside_workspaces(self):
         output = experiment.ROOT / "evals/behavioral/results/evidence-claims-v3-screen.json"
         artifacts = [output, *(Path(f"{output}{suffix}") for suffix in (
-            ".metrics-v2.json", ".reservation.json", ".promptfoo", ".traces"))]
+            ".metrics-v2.json", ".reservation.json", ".promptfoo", ".traces",
+            ".schedule.json", ".accounting-v1.json"))]
         for artifact in artifacts:
             self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
         with tempfile.TemporaryDirectory() as temp:
@@ -1485,7 +1515,8 @@ class SpikeValidationTests(unittest.TestCase):
     def test_screen_runner_accepts_a_complete_review_only_run(self):
         output = experiment.ROOT / "evals/behavioral/results/evidence-claims-v3-screen.json"
         artifacts = [output, *(Path(f"{output}{suffix}") for suffix in (
-            ".metrics-v2.json", ".reservation.json", ".promptfoo", ".traces"))]
+            ".metrics-v2.json", ".reservation.json", ".promptfoo", ".traces",
+            ".schedule.json", ".accounting-v1.json"))]
         for artifact in artifacts:
             self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
         rows = []

@@ -61,4 +61,14 @@ export function hasCompleteNormalizedRows(payload, expectedRows) {
     aggregate?.completed === expectedRows && aggregate?.errors === 0;
 }
 
+const ACCOUNTING_ID = "muse-attempt-accounting-v1";
+
+export function hasCompleteAccounting(accounting, expectedRows) {
+  const inner = accounting?.accounting ?? accounting;
+  if (inner?.id !== ACCOUNTING_ID) return false;
+  const slots = inner?.slots;
+  if (!Array.isArray(slots) || slots.length !== expectedRows) return false;
+  return slots.every((slot) => slot?.status === "completed" || slot?.status === "quarantined");
+}
+
 export { NORMALIZATION_ID, SPIKE_PROVIDER_LABELS };

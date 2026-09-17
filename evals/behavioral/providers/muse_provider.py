@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,33 @@ except ImportError:  # Promptfoo loads provider files outside their package.
         repo_root as _repo_root,
         resolve_commit as _resolve_commit,
         validate_skill_name,
+    )
+
+try:
+    from .attempt_evidence import (
+        classify_completion,
+        default_sessions_root,
+        locate_session_dir,
+        path_scope,
+        retain_attempt_evidence,
+        session_id_from_stream,
+        session_record_gap,
+        tool_lookups,
+        usage_summary,
+        written_file_versions,
+    )
+except ImportError:  # Promptfoo loads provider files outside their package.
+    from attempt_evidence import (  # type: ignore[no-redef]
+        classify_completion,
+        default_sessions_root,
+        locate_session_dir,
+        path_scope,
+        retain_attempt_evidence,
+        session_id_from_stream,
+        session_record_gap,
+        tool_lookups,
+        usage_summary,
+        written_file_versions,
     )
 
 VARIANTS = {"none", "current", "candidate"}
@@ -495,6 +523,213 @@ def _text(value: Any) -> str:
     return value or ""
 
 
+def _stream_events(stdout: str) -> list[dict[str, Any]]:
+    """Parse the ``muse exec --json`` JSONL stream into envelope dicts."""
+
+    events: list[dict[str, Any]] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _schedule_identity(
+    context: dict[str, Any], candidate_id: str | None
+) -> tuple[str | None, str | None, str | None]:
+    """Build the attempt schedule key ``<provider>|<case>|<repeat or null>``.
+
+    The provider label, case id and repeat index come from the Promptfoo
+    context when available; the key is None when the label or case is unknown.
+    """
+
+    variables = context.get("vars") or {}
+    test = context.get("test") or {}
+    test_metadata = test.get("metadata") or {} if isinstance(test, dict) else {}
+    provider_block = context.get("provider") or {}
+    label = None
+    if isinstance(provider_block, dict):
+        label = provider_block.get("label") or provider_block.get("id")
+    if not label and isinstance(context.get("label"), str):
+        label = context.get("label")
+    if not label:
+        label = candidate_id
+    case_id = test_metadata.get("case_id") if isinstance(test_metadata, dict) else None
+    if not case_id:
+        case_id = variables.get("case_id")
+    repeat = None
+    for source in (test_metadata, variables, context):
+        if not isinstance(source, dict):
+            continue
+        for key in ("repeat_index", "repeatIndex", "repeat", "n"):
+            value = source.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int) and value >= 0:
+                repeat = value
+                break
+        if repeat is not None:
+            break
+    if not label or not case_id:
+        return None, label, case_id
+    return f"{label}|{case_id}|{repeat if repeat is not None else 'null'}", label, case_id
+
+
+def _reported_head_sha(output: str) -> str | None:
+    """Return the review JSON's ``head_sha`` when parseable, else None."""
+
+    text = output.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    value: Any = None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            value = json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    reported = value.get("head_sha")
+    return reported if isinstance(reported, str) and reported else None
+
+
+def _head_binding(reported: str | None, expected: Any) -> str:
+    """Bind the reported head to the expected head SHA.
+
+    ``match`` when the reported value is a >=7-char hex prefix of the
+    expected head, ``mismatch`` when both are present but do not bind, and
+    ``missing`` when either side is absent or malformed.
+    """
+
+    if not isinstance(reported, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", reported):
+        return "missing"
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", expected):
+        return "missing"
+    return "match" if expected.lower().startswith(reported.lower()) else "mismatch"
+
+
+def _workspace_binding(
+    events: list[dict[str, Any]], workspace: Path, head_sha: Any
+) -> str:
+    """Bind the stream's workspace observation to this attempt.
+
+    Uses the last ``session.workspace_branch.observed`` record:
+    ``payload.record.workspace_root`` must equal the attempt workspace and
+    ``payload.record.commit`` must be a prefix of the head SHA. ``unknown``
+    when no record (or no head) can verify the binding.
+    """
+
+    latest: dict[str, Any] | None = None
+    for event in events:
+        if event.get("payload_type") != "session.workspace_branch.observed":
+            continue
+        payload = event.get("payload")
+        record = payload.get("record") if isinstance(payload, dict) else None
+        if isinstance(record, dict):
+            latest = record
+    if latest is None:
+        return "unknown"
+    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", head_sha):
+        return "unknown"
+    commit = latest.get("commit")
+    if latest.get("workspace_root") == str(workspace) and isinstance(commit, str) and commit and head_sha.lower().startswith(commit.lower()):
+        return "match"
+    return "mismatch"
+
+
+def _append_ledger(trace_dir: str | None, line: dict[str, Any]) -> bool:
+    """Append one JSON line to the attempt ledger (0600, O_APPEND)."""
+
+    if not trace_dir:
+        return True
+    try:
+        directory = Path(trace_dir)
+        path = directory / "attempts.jsonl"
+        data = (json.dumps(line, sort_keys=True) + "\n").encode("utf-8")
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+        finally:
+            os.close(descriptor)
+        return True
+    except OSError:
+        return False
+
+
+def _read_jsonl_records(path: Path) -> list[dict[str, Any]]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip().startswith("{"):
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _retained_attempt_records(
+    evidence_attempt_dir: Path,
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]], list[dict[str, str]]]:
+    """Read parent/child session records back from the retained evidence copy."""
+
+    parent = _read_jsonl_records(evidence_attempt_dir / "session" / "session.jsonl")
+    children: dict[str, list[dict[str, Any]]] = {}
+    subagents = evidence_attempt_dir / "session" / "subagent"
+    if subagents.is_dir():
+        for child in sorted(subagents.iterdir(), key=lambda p: p.name):
+            log = child / "session.jsonl"
+            if log.is_file():
+                children[child.name] = _read_jsonl_records(log)
+    linked: list[dict[str, str]] = []
+    reminders = evidence_attempt_dir / "session" / "reminder"
+    reminder_ids: list[str] = []
+    for record in parent:
+        payload = record.get("payload")
+        event = payload.get("event") if isinstance(payload, dict) else None
+        if not isinstance(event, dict):
+            continue
+        if event.get("kind") != "memory_reminder_child_session_linked":
+            continue
+        child_id = event.get("child_session_id")
+        if isinstance(child_id, str) and child_id and child_id not in reminder_ids:
+            reminder_ids.append(child_id)
+    for child_id in reminder_ids:
+        child_dir = reminders / child_id
+        logs: list[dict[str, Any]] = []
+        if child_dir.is_dir():
+            for log in sorted(child_dir.iterdir(), key=lambda p: p.name):
+                if log.is_file() and log.suffix == ".jsonl":
+                    logs.extend(_read_jsonl_records(log))
+        linked.append({"id": child_id, "kind": "reminder"})
+        if logs:
+            # A linked child without a retained log stays absent here so the
+            # usage summary reports it as a missing log, never as zero usage.
+            children.setdefault(child_id, logs)
+    return parent, children, linked
+
+
 def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     config = options.get("config") or {}
     variables = context.get("vars") or {}
@@ -596,6 +831,31 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
             args.append(prompt)
 
             env = _review_env(repo_root)
+            # Per-attempt scratch beside the checkout. A relocated TMPDIR is
+            # not preventive isolation (#24 owns proof), so this is recorded
+            # as per-attempt-tmpdir with no isolation proof.
+            scratch = Path(temp) / "scratch"
+            scratch.mkdir(mode=0o700, exist_ok=True)
+            try:
+                os.chmod(scratch, 0o700)
+            except OSError:
+                pass
+            env["TMPDIR"] = env["TMP"] = env["TEMP"] = str(scratch)
+            attempt_id = uuid.uuid4().hex
+            schedule_key, provider_label, ledger_case_id = _schedule_identity(
+                context, candidate_id
+            )
+            ledger_ok = _append_ledger(
+                trace_dir,
+                {
+                    "phase": "started",
+                    "attemptId": attempt_id,
+                    "scheduleKey": schedule_key,
+                    "providerLabel": provider_label,
+                    "case_id": ledger_case_id,
+                    "startedAt": time.time(),
+                },
+            )
             started = time.monotonic()
             timed_out = False
             try:
@@ -607,6 +867,16 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 stdout, stderr = _text(exc.output), _text(exc.stderr)
             latency_ms = round((time.monotonic() - started) * 1000)
             parsed = _parse_muse_stream(stdout, skill_name)
+            events = _stream_events(stdout)
+            completion = classify_completion(
+                events, None if timed_out else result.returncode, timed_out
+            )
+            output = completion.get("output") if completion["status"] == "completed" else ""
+            output = output if isinstance(output, str) else ""
+            muse_session_id = session_id_from_stream(events)
+            reported_head = _reported_head_sha(output)
+            head_binding = _head_binding(reported_head, variables.get("head_sha"))
+            workspace_binding = _workspace_binding(events, workspace, variables.get("head_sha"))
             external_source = variables.get("source_repository") in REMOTE_CASE_SOURCES
             checked = spike_run and external_source
             metadata = {
@@ -639,19 +909,153 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 ),
                 "controlMode": "project-placeholder" if variant == "none" else None,
                 "stderrTail": stderr[-1000:],
+                "attemptId": attempt_id,
+                "scheduleKey": schedule_key,
+                "museSessionId": muse_session_id,
+                "museRunId": completion.get("runId"),
+                "completionStatus": completion["status"],
+                "terminalReason": completion.get("terminalReason"),
+                "reviewedHeadReported": reported_head,
+                "headBinding": head_binding,
+                "sessionWorkspaceBinding": workspace_binding,
+                "scratchIsolation": "per-attempt-tmpdir",
+                "scratchIsolationProof": "none",
                 **_retain_trace(trace_dir, context, candidate_id, stdout, stderr),
             }
 
+            if trace_dir:
+                # Retain attempt evidence after Muse exits (timeout included)
+                # and before the temporary directory is removed.
+                evidence_root = Path(trace_dir) / "evidence"
+                try:
+                    evidence_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    os.chmod(evidence_root, 0o700)
+                except OSError:
+                    pass
+                sessions_root = default_sessions_root(config)
+                session_dir = (
+                    locate_session_dir(sessions_root, muse_session_id)
+                    if muse_session_id
+                    else None
+                )
+                retention = retain_attempt_evidence(
+                    evidence_root, attempt_id, session_dir, scratch, None
+                )
+                gaps = list(retention["evidenceGaps"])
+                if session_dir is None and session_record_gap(events) == "session-record-ambiguous":
+                    gaps = [
+                        "session-record-ambiguous" if gap == "session-record-missing" else gap
+                        for gap in gaps
+                    ]
+                evidence_status = retention["evidenceStatus"]
+                metadata["evidenceStatus"] = evidence_status
+                metadata["evidenceGaps"] = gaps
+                metadata["evidenceManifestSha256"] = retention["evidenceManifestSha256"]
+                attempt_evidence_dir = evidence_root / attempt_id
+                if evidence_status in {"retained", "partial"}:
+                    retained_parent, retained_children, retained_linked = (
+                        _retained_attempt_records(attempt_evidence_dir)
+                    )
+                else:
+                    retained_parent, retained_children, retained_linked = [], {}, []
+                tagged_records = [{"session": "parent", "record": record} for record in retained_parent]
+                tagged_records.extend(
+                    {"session": child_id, "record": record}
+                    for child_id, logs in retained_children.items()
+                    for record in logs
+                )
+                written_files = (
+                    written_file_versions(tagged_records)
+                    if evidence_status in {"retained", "partial"}
+                    else []
+                )
+                lookups = tool_lookups(stdout, workspace, tagged_records, scratch)
+                usage = usage_summary(retained_parent, retained_children, retained_linked)
+                metadata["writtenFiles"] = written_files
+                metadata["toolLookups"] = lookups
+                metadata["museUsage"] = usage
+                audit_flags: list[str] = []
+                if any(
+                    isinstance(entry.get("path"), str)
+                    and path_scope(entry["path"], workspace, scratch) == "outside"
+                    for entry in written_files
+                ):
+                    audit_flags.append("write-outside-attempt-scratch")
+                for lookup in lookups:
+                    for flag in lookup.get("flags", []):
+                        if flag not in audit_flags:
+                            audit_flags.append(flag)
+                if evidence_status != "retained":
+                    # Missing or partial evidence cannot be audited: quarantine
+                    # the row, never approve it.
+                    audit_flags.append("evidence-unavailable")
+                if checked and audit_flags:
+                    metadata["graderBoundaryFlags"] = sorted(
+                        set(metadata["graderBoundaryFlags"]) | set(audit_flags)
+                    )
+                if usage.get("coverage") == "complete" and isinstance(usage.get("total"), dict):
+                    total = usage["total"]
+                    prompt_tokens = int(total.get("input_tokens", 0))
+                    completion_tokens = int(total.get("output_tokens", 0))
+                    compat = {
+                        "prompt": prompt_tokens,
+                        "completion": completion_tokens,
+                        "total": prompt_tokens + completion_tokens,
+                    }
+                    metadata["museTokenUsage"] = compat
+                    metadata["candidateTokenStatus"] = "observed"
+                    metadata["_compatTokenUsage"] = compat
+                else:
+                    metadata.pop("museTokenUsage", None)
+                    metadata["candidateTokenStatus"] = (
+                        "partial" if usage.get("coverage") == "partial" else "unavailable"
+                    )
+                    metadata.pop("_compatTokenUsage", None)
+
             def failed(message: str) -> dict[str, Any]:
+                metadata.pop("_compatTokenUsage", None)
+                ledger_ok = _append_ledger(
+                    trace_dir,
+                    {
+                        "phase": "finished",
+                        "attemptId": attempt_id,
+                        "scheduleKey": schedule_key,
+                        "completionStatus": completion["status"],
+                        "flags": list(metadata.get("graderBoundaryFlags") or []),
+                        "evidenceStatus": metadata.get("evidenceStatus"),
+                        "error": message,
+                        "finishedAt": time.time(),
+                    },
+                )
+                # A ledger write failure quarantines the row but never discards
+                # a finished review.
+                metadata["ledgerStatus"] = "ok" if ledger_ok else "failed"
+                if not ledger_ok and checked and "ledger-unavailable" not in metadata["graderBoundaryFlags"]:
+                    metadata["graderBoundaryFlags"] = sorted(
+                        [*metadata["graderBoundaryFlags"], "ledger-unavailable"]
+                    )
                 return {"error": message, "latencyMs": latency_ms, "metadata": metadata}
+
+            if not ledger_ok:
+                metadata["ledgerStatus"] = "failed"
+                if checked:
+                    metadata["graderBoundaryFlags"] = sorted(
+                        set(metadata["graderBoundaryFlags"]) | {"ledger-unavailable"}
+                    )
+            else:
+                metadata["ledgerStatus"] = "ok" if trace_dir else "not-enabled"
 
             if timed_out:
                 return failed(f"Muse timed out after {timeout_seconds}s")
             if result.returncode != 0:
                 detail = stderr.strip() or stdout[-2000:]
                 return failed(f"Muse exited {result.returncode}: {detail}")
-            if not parsed["output"].strip():
-                return failed("Muse completed without a terminal review output")
+            if completion["status"] != "completed":
+                reason = completion.get("terminalReason")
+                suffix = f": {reason}" if reason else ""
+                return failed(
+                    f"Muse run did not complete (status={completion['status']}{suffix})"
+                )
             if spike_run and variant in {"current", "candidate"} and not parsed["skillObserved"]:
                 return failed("Muse completed without observing the delivered project skill")
             if spike_run and not parsed["models"]:
@@ -661,14 +1065,44 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                     f"Muse model telemetry mismatch: expected {configured_model}, "
                     f"observed {parsed['models']}"
                 )
+            if head_binding != "match":
+                return failed(
+                    f"stale/mismatched review: reported head {reported_head!r} "
+                    f"does not bind to expected head {variables.get('head_sha')!r}"
+                )
+            if workspace_binding == "mismatch":
+                return failed("stale/mismatched review: session workspace does not bind to this attempt")
 
+            finished_ok = _append_ledger(
+                trace_dir,
+                {
+                    "phase": "finished",
+                    "attemptId": attempt_id,
+                    "scheduleKey": schedule_key,
+                    "completionStatus": completion["status"],
+                    "flags": list(metadata.get("graderBoundaryFlags") or []),
+                    "evidenceStatus": metadata.get("evidenceStatus"),
+                    "error": None,
+                    "finishedAt": time.time(),
+                },
+            )
+            if not finished_ok:
+                metadata["ledgerStatus"] = "failed"
+                if checked and "ledger-unavailable" not in metadata["graderBoundaryFlags"]:
+                    metadata["graderBoundaryFlags"] = sorted(
+                        [*metadata["graderBoundaryFlags"], "ledger-unavailable"]
+                    )
             response = {
-                "output": parsed["output"],
+                "output": output,
                 "latencyMs": latency_ms,
                 "cached": False,
                 "metadata": metadata,
             }
-            if parsed["usage"]:
+            compat_usage = metadata.pop("_compatTokenUsage", None)
+            if trace_dir:
+                if compat_usage is not None:
+                    response["tokenUsage"] = compat_usage
+            elif parsed["usage"]:
                 response["tokenUsage"] = parsed["usage"]
             return response
     except (OSError, ProviderError, ValueError) as exc:
