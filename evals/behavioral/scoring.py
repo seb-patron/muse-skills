@@ -8,6 +8,7 @@ gold and never let an incomplete row masquerade as a zero-recall review.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -358,10 +359,11 @@ def main() -> int:
                     continue
                 if isinstance(record, dict):
                     ledger_lines.append(record)
-        payload = None
-        if args.input is not None and args.input.exists():
-            payload = json.loads(args.input.read_text(encoding="utf-8"))
-        accounting = account_attempts(schedule, ledger_lines, payload)
+        # The raw result file is never modified or rewritten here; a read or
+        # parse failure only degrades the report (rawResult block) while the
+        # slots are still listed from the schedule and the ledger alone.
+        payload, raw_result = _read_raw_result(args.input)
+        accounting = account_attempts(schedule, ledger_lines, payload, raw_result)
         if args.accounting_output.exists():
             print(
                 f"refuses to overwrite existing accounting output: {args.accounting_output}",
@@ -539,26 +541,120 @@ def _short_error(text: Any, limit: int = 160) -> str:
     return text.strip().splitlines()[0][:limit]
 
 
+RAW_RESULT_STATUSES = frozenset(
+    {"parsed", "empty", "unparsable", "unreadable", "missing", "wrong-shape"}
+)
+
+
+def _payload_shape_status(payload: Any) -> str:
+    """Classify a decoded payload as usable (`parsed`) or `wrong-shape`."""
+
+    if not isinstance(payload, Mapping):
+        return "wrong-shape"
+    inner = payload.get("results") if isinstance(payload.get("results"), Mapping) else payload
+    raw_rows = inner.get("results") if isinstance(inner, Mapping) else None
+    return "parsed" if isinstance(raw_rows, list) else "wrong-shape"
+
+
+def _read_raw_result(path: Path | None) -> tuple[Any | None, dict[str, Any]]:
+    """Read the raw Promptfoo result without ever modifying it.
+
+    Returns ``(payload_or_None, raw_result_block)`` where the block records
+    ``status`` in {``parsed``, ``empty``, ``unparsable``, ``unreadable``,
+    ``missing``, ``wrong-shape``} plus the error type/message and, whenever
+    the bytes were readable, the file's byte size and sha256. A degraded
+    result still yields ``payload None`` so accounting falls back to the
+    schedule and the ledger alone.
+    """
+
+    def block(
+        status: str,
+        error_type: str | None = None,
+        error: str | None = None,
+        size: int | None = None,
+        digest: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "errorType": error_type,
+            "error": error,
+            "bytes": size,
+            "sha256": digest,
+        }
+
+    if path is None or not path.exists():
+        return None, block("missing")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return None, block("unreadable", type(exc).__name__, str(exc))
+    digest = hashlib.sha256(data).hexdigest()
+    size = len(data)
+    if not data.strip():
+        return None, block(
+            "empty", "EmptyResult", "raw Promptfoo result is empty", size, digest
+        )
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return None, block(
+            "unreadable", type(exc).__name__, str(exc), size, digest
+        )
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return None, block(
+            "unparsable", type(exc).__name__, str(exc), size, digest
+        )
+    if _payload_shape_status(payload) == "wrong-shape":
+        return None, block(
+            "wrong-shape",
+            "WrongShape",
+            "raw Promptfoo result has no results array",
+            size,
+            digest,
+        )
+    return payload, block("parsed", None, None, size, digest)
+
+
 def account_attempts(
     schedule: Mapping[str, Any],
     ledger_lines: Iterable[Mapping[str, Any]] | None,
     promptfoo_payload: Mapping[str, Any] | None,
+    raw_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Account for every scheduled attempt of a review batch.
 
     ``schedule`` is ``{"stage", "providers": [...], "cases": [...],
     "repeat": n}``. Every scheduled slot (provider x case x repeat) is listed
     with status ``completed``, ``error:<completionStatus or message>``,
-    ``quarantined`` (row completed but flagged), ``missing`` (no row and no
+    ``quarantined`` (row completed but flagged), ``finished-no-result`` (a
+    finished ledger record with no raw row), ``missing`` (no row and no
     ledger record), ``started-not-finished`` or ``unscheduled-extra`` (row not
-    in schedule). Original deterministic flags travel verbatim; nothing is
-    dropped. Totals count every status.
+    in schedule). Slots without a raw row keep the ledger's facts in
+    explicitly named ``ledger*`` fields plus ``rawRow: "missing"`` and are
+    never ``completed``/``delivered``/``eligible`` (``deliveredReview`` stays
+    false). Original deterministic flags travel verbatim; nothing is dropped.
+    Totals count every status. ``raw_result`` describes the raw Promptfoo
+    result file (see ``_read_raw_result``); when omitted it is derived from
+    the payload shape alone.
     """
 
     providers = list(schedule.get("providers") or [])
     cases = list(schedule.get("cases") or [])
     repeat = schedule.get("repeat", 1)
     repeat = repeat if isinstance(repeat, int) and repeat >= 1 else 1
+    if raw_result is None:
+        raw_result = {
+            "status": (
+                "missing" if promptfoo_payload is None
+                else _payload_shape_status(promptfoo_payload)
+            ),
+            "errorType": None,
+            "error": None,
+            "bytes": None,
+            "sha256": None,
+        }
     raw_rows = _raw_promptfoo_rows(promptfoo_payload)
     converted: list[dict[str, Any]] = []
     if raw_rows:
@@ -632,8 +728,54 @@ def account_attempts(
                         row_index = group.pop(0)
                         consumed.add(row_index)
                 if row_index is None:
-                    if "finished" in phases:
-                        status = "missing"
+                    # No raw row: keep the ledger's facts in explicitly named
+                    # fields, separate from the missing raw/scored output. A
+                    # finished ledger record alone is never a completed,
+                    # delivered or eligible review.
+                    finished_lines = [
+                        line for line in records
+                        if isinstance(line, Mapping)
+                        and str(line.get("phase")) == "finished"
+                    ]
+                    last_finished = finished_lines[-1] if finished_lines else None
+                    ledger_completion = (
+                        last_finished.get("completionStatus")
+                        if last_finished is not None else None
+                    )
+                    ledger_error = (
+                        last_finished.get("error")
+                        if last_finished is not None else None
+                    )
+                    ledger_flags = (
+                        last_finished.get("flags")
+                        if last_finished is not None else None
+                    )
+                    ledger_evidence = (
+                        last_finished.get("evidenceStatus")
+                        if last_finished is not None else None
+                    )
+                    if last_finished is not None:
+                        ledger_text = (
+                            ledger_error
+                            if isinstance(ledger_error, str) and ledger_error.strip()
+                            else ""
+                        )
+                        if ledger_text:
+                            status = f"error:{_short_error(ledger_text)}"
+                        elif (
+                            isinstance(ledger_completion, str)
+                            and ledger_completion == "completed"
+                        ):
+                            # The ledger claims a clean finish but no raw row
+                            # exists: inspectable, never completed/delivered.
+                            status = "finished-no-result"
+                        else:
+                            reason = (
+                                ledger_completion
+                                if isinstance(ledger_completion, str) and ledger_completion
+                                else "unknown"
+                            )
+                            status = f"error:{reason}"
                     elif "started" in phases:
                         status = "started-not-finished"
                     else:
@@ -654,6 +796,16 @@ def account_attempts(
                             "flags": None,
                             "error": None,
                             "completion": False,
+                            "rawRow": "missing",
+                            "ledgerCompletionStatus": ledger_completion,
+                            "ledgerError": ledger_error,
+                            "ledgerFlags": (
+                                list(ledger_flags)
+                                if isinstance(ledger_flags, list)
+                                else ledger_flags
+                            ),
+                            "ledgerEvidenceStatus": ledger_evidence,
+                            "deliveredReview": False,
                         }
                     )
                     continue
@@ -730,6 +882,76 @@ def account_attempts(
     duplicate_slots = sum(
         1 for entry in slots if entry["duplicateAttemptIds"] or entry["duplicateRows"]
     )
+    # Ledger attempts that match no scheduled slot stay individually
+    # inspectable here (the ledgerLines count is kept as well).
+    scheduled_keys = {
+        (provider, case, position)
+        for provider in providers
+        for case in cases
+        for position in range(repeat)
+    }
+    unassigned: list[dict[str, Any]] = []
+    for attempt in sorted(ledger_by_attempt):
+        lines = ledger_by_attempt[attempt]
+        keys = {
+            key for line in lines
+            if isinstance(line, Mapping)
+            for key in [_ledger_slot_key(line)]
+            if key is not None
+        }
+        if keys & scheduled_keys:
+            continue
+        phases = sorted(
+            {str(line.get("phase")) for line in lines if isinstance(line, Mapping)}
+        )
+        finished_lines = [
+            line for line in lines
+            if isinstance(line, Mapping) and str(line.get("phase")) == "finished"
+        ]
+        last_finished = finished_lines[-1] if finished_lines else None
+        schedule_key: str | None = None
+        provider_label: str | None = None
+        case_id: str | None = None
+        repeat_index: Any = None
+        for line in lines:
+            if not isinstance(line, Mapping):
+                continue
+            if schedule_key is None and isinstance(line.get("scheduleKey"), str):
+                schedule_key = line["scheduleKey"]
+            if provider_label is None and isinstance(line.get("providerLabel"), str):
+                provider_label = line["providerLabel"]
+            if case_id is None and isinstance(line.get("case_id"), str):
+                case_id = line["case_id"]
+            if repeat_index is None and line.get("repeatIndex") is not None:
+                repeat_index = line["repeatIndex"]
+        slot = sorted(keys)[0] if keys else None
+        unassigned.append(
+            {
+                "attemptId": attempt,
+                "scheduleKey": schedule_key,
+                "slot": list(slot) if slot is not None else None,
+                "phases": phases,
+                "providerLabel": provider_label,
+                "case_id": case_id,
+                "repeatIndex": repeat_index,
+                "completionStatus": (
+                    last_finished.get("completionStatus")
+                    if last_finished is not None else None
+                ),
+                "error": (
+                    last_finished.get("error")
+                    if last_finished is not None else None
+                ),
+                "flags": (
+                    last_finished.get("flags")
+                    if last_finished is not None else None
+                ),
+                "evidenceStatus": (
+                    last_finished.get("evidenceStatus")
+                    if last_finished is not None else None
+                ),
+            }
+        )
     return {
         "accounting": {
             "id": ACCOUNTING_ID,
@@ -746,6 +968,8 @@ def account_attempts(
             "duplicateSlots": duplicate_slots,
             "ledgerLines": ledger_count,
             "rows": len(raw_rows),
+            "rawResult": dict(raw_result),
+            "unassignedAttempts": unassigned,
         }
     }
 
@@ -898,13 +1122,28 @@ def adjudicated_readout(
         case = key_cases.get(case_id) if isinstance(key_cases, Mapping) else None
         expected = case.get("expected_verdict") if isinstance(case, Mapping) else None
         actual = deterministic.get("actual_verdict") if isinstance(deterministic, Mapping) else None
+        # false_approval rests on the deterministic verdict mismatch (a
+        # key-based fact, not an owner decision), so it stays boolean.
         false_approval = bool(eligible and expected == "NEEDS_FIXES" and actual == "APPROVE")
-        false_block = bool(
-            eligible
-            and expected == "APPROVE"
-            and actual == "NEEDS_FIXES"
-            and not novel_valid_consequential
-        )
+        # A pending adjudication is not a confirmed false block: without an
+        # owner entry the claim stays null (pending). A confirmed block needs
+        # an adjudication that records no accepted novel valid consequential
+        # finding and otherwise supports the conclusion (an adjudicated
+        # unsupported blocker, or nothing accepted at all); a matched
+        # consequential key finding supporting NEEDS_FIXES means no block.
+        # The deterministic verdict mismatch itself stays visible verbatim in
+        # ``deterministic`` regardless of this owner-side outcome.
+        if eligible and expected == "APPROVE" and actual == "NEEDS_FIXES":
+            if owner is None:
+                false_block = None
+            elif novel_valid_consequential:
+                false_block = False
+            elif matched:
+                false_block = False
+            else:
+                false_block = True
+        else:
+            false_block = False
         attempts.append(
             {
                 "provider": provider,
@@ -963,7 +1202,16 @@ def adjudicated_readout(
             "completed_review_recall": (sum(recalls) / len(recalls)) if recalls else None,
             "useful_delivery": (matched_total / key_total) if key_total else None,
             "false_approvals": sum(1 for entry in eligible_entries if entry["adjudicated"].get("false_approval")),
-            "false_blocks": sum(1 for entry in eligible_entries if entry["adjudicated"].get("false_block")),
+            # Only confirmed true values count as false blocks; pending
+            # (null) ones are reported separately, never as decisions.
+            # Neighbouring aggregates audited for the same "missing evidence
+            # treated as a decision" mistake: false_approval rests on
+            # deterministic verdicts (key-based facts); novel_valid and
+            # unsupported count recorded owner assessments (zero when none
+            # recorded); recall is already null-on-missing and delivery only
+            # sums accepted matches. Only false_block conflated the two.
+            "false_blocks": sum(1 for entry in eligible_entries if entry["adjudicated"].get("false_block") is True),
+            "false_blocks_pending": sum(1 for entry in eligible_entries if entry["adjudicated"].get("false_block") is None),
             "novel_valid": sum(int(entry["adjudicated"].get("novel_valid", 0)) for entry in eligible_entries),
             "unsupported": sum(int(entry["adjudicated"].get("unsupported", 0)) for entry in eligible_entries),
             "exclusions": sum(

@@ -37,6 +37,7 @@ except ImportError:  # Promptfoo loads provider files outside their package.
 try:
     from .attempt_evidence import (
         SESSION_ID_RE,
+        _linked_child_ids,
         classify_completion,
         default_sessions_root,
         locate_session_dir,
@@ -52,6 +53,7 @@ try:
 except ImportError:  # Promptfoo loads provider files outside their package.
     from attempt_evidence import (  # type: ignore[no-redef]
         SESSION_ID_RE,
+        _linked_child_ids,
         classify_completion,
         default_sessions_root,
         locate_session_dir,
@@ -705,52 +707,161 @@ def _read_jsonl_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _retained_log_records(path: Path) -> tuple[list[dict[str, Any]] | None, bool]:
+    """Read a retained session log without following symlinks.
+
+    Returns ``(records_or_None, skipped_symlink)``: None with True means a
+    symlink was left behind (never followed); None with False means the log
+    is absent.
+    """
+
+    try:
+        if path.is_symlink():
+            return None, True
+        if not path.is_file():
+            return None, False
+    except OSError:
+        return None, False
+    return _read_jsonl_records(path), False
+
+
+def _manifest_symlink_child_ids(evidence_attempt_dir: Path) -> set[str]:
+    """Recover retention-time symlinked child ids from the manifest.
+
+    Symlinked child logs are never copied, so the retained directory alone
+    cannot show they existed; the manifest's skipped entries can.
+    """
+
+    try:
+        manifest = json.loads(
+            (evidence_attempt_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return set()
+    found: set[str] = set()
+    skipped = manifest.get("skipped") if isinstance(manifest, dict) else None
+    if not isinstance(skipped, list):
+        return found
+    for entry in skipped:
+        if not isinstance(entry, dict) or entry.get("type") != "symlink":
+            continue
+        rel = entry.get("path")
+        if not isinstance(rel, str):
+            continue
+        parts = rel.split("/")
+        if len(parts) >= 3 and parts[0] == "session" and parts[1] == "subagent":
+            if SESSION_ID_RE.match(parts[2]):
+                found.add(parts[2])
+    return found
+
+
 def _retained_attempt_records(
     evidence_attempt_dir: Path,
-) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]], list[dict[str, str]]]:
-    """Read parent/child session records back from the retained evidence copy."""
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, list[dict[str, Any]]],
+    list[dict[str, str]],
+    dict[str, str],
+]:
+    """Read parent/child session records back from the retained evidence copy.
 
-    parent = _read_jsonl_records(evidence_attempt_dir / "session" / "session.jsonl")
+    Never follows symlinks: a symlinked log reads as a skipped record, not
+    as its target. Returns ``(parent, children, linked, child_inventory)``
+    where the inventory maps every expected child id (each
+    ``subagent/<id>/`` entry plus every reminder-linked id) to ``observed`` |
+    ``missing-log`` | ``skipped-symlink`` | ``unusable`` (empty, unparsable
+    or unreadable) | ``missing-child-dir``.
+    """
+
+    parent_records, _ = _retained_log_records(
+        evidence_attempt_dir / "session" / "session.jsonl"
+    )
+    parent = parent_records if parent_records is not None else []
     children: dict[str, list[dict[str, Any]]] = {}
+    inventory: dict[str, str] = {}
     subagents = evidence_attempt_dir / "session" / "subagent"
-    if subagents.is_dir():
-        for child in sorted(subagents.iterdir(), key=lambda p: p.name):
-            log = child / "session.jsonl"
-            if log.is_file():
-                children[child.name] = _read_jsonl_records(log)
+    try:
+        dir_is_link = subagents.is_symlink()
+    except OSError:
+        dir_is_link = False
+    if not dir_is_link:
+        try:
+            is_dir = subagents.is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir:
+            try:
+                entries = sorted(subagents.iterdir(), key=lambda p: p.name)
+            except OSError:
+                entries = []
+            for child in entries:
+                log = child / "session.jsonl"
+                try:
+                    if child.is_symlink() or log.is_symlink():
+                        inventory[child.name] = "skipped-symlink"
+                        continue
+                    if not child.is_dir():
+                        continue
+                except OSError:
+                    inventory[child.name] = "unusable"
+                    continue
+                records, _ = _retained_log_records(log)
+                if records is None:
+                    inventory[child.name] = "missing-log"
+                elif records:
+                    inventory[child.name] = "observed"
+                    children[child.name] = records
+                else:
+                    inventory[child.name] = "unusable"
+                    children[child.name] = []
+    for child_id in _manifest_symlink_child_ids(evidence_attempt_dir):
+        inventory.setdefault(child_id, "skipped-symlink")
     linked: list[dict[str, str]] = []
+    # Child ids reach the filesystem below; only session UUIDs pass, so a
+    # traversal id can never escape the evidence directory.
+    reminder_ids, _ = _linked_child_ids(parent)
     reminders = evidence_attempt_dir / "session" / "reminder"
-    reminder_ids: list[str] = []
-    for record in parent:
-        payload = record.get("payload")
-        event = payload.get("event") if isinstance(payload, dict) else None
-        if not isinstance(event, dict):
-            continue
-        if event.get("kind") != "memory_reminder_child_session_linked":
-            continue
-        child_id = event.get("child_session_id")
-        # Child ids reach the filesystem below; only session UUIDs pass, so a
-        # traversal id can never escape the evidence directory.
-        if (
-            isinstance(child_id, str)
-            and child_id
-            and SESSION_ID_RE.match(child_id)
-            and child_id not in reminder_ids
-        ):
-            reminder_ids.append(child_id)
-    for child_id in reminder_ids:
+    for child_id in sorted(reminder_ids):
         child_dir = reminders / child_id
         logs: list[dict[str, Any]] = []
-        if child_dir.is_dir():
-            for log in sorted(child_dir.iterdir(), key=lambda p: p.name):
-                if log.is_file() and log.suffix == ".jsonl":
-                    logs.extend(_read_jsonl_records(log))
+        try:
+            dir_link = child_dir.is_symlink()
+        except OSError:
+            dir_link = False
+        if not dir_link:
+            try:
+                is_dir = child_dir.is_dir()
+            except OSError:
+                is_dir = False
+            if is_dir:
+                try:
+                    log_files = sorted(child_dir.iterdir(), key=lambda p: p.name)
+                except OSError:
+                    log_files = []
+                for log in log_files:
+                    if log.suffix != ".jsonl":
+                        continue
+                    records, _ = _retained_log_records(log)
+                    if records:
+                        logs.extend(records)
         linked.append({"id": child_id, "kind": "reminder"})
-        if logs:
+        if logs and not children.get(child_id):
             # A linked child without a retained log stays absent here so the
-            # usage summary reports it as a missing log, never as zero usage.
-            children.setdefault(child_id, logs)
-    return parent, children, linked
+            # usage summary reports it as uncovered, never as zero usage.
+            children[child_id] = logs
+    for child_id in sorted(reminder_ids):
+        if child_id in inventory:
+            continue
+        if children.get(child_id):
+            inventory[child_id] = "observed"
+        else:
+            inventory[child_id] = "missing-child-dir"
+    for child_id, records in children.items():
+        if records and inventory.get(child_id) != "skipped-symlink":
+            # Parseable records win: a log that yielded records is observed
+            # even when another source looked empty.
+            inventory[child_id] = "observed"
+    return parent, children, linked, inventory
 
 
 def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
@@ -995,11 +1106,15 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                 metadata["evidenceManifestSha256"] = retention["evidenceManifestSha256"]
                 attempt_evidence_dir = evidence_root / attempt_id
                 if evidence_status in {"retained", "partial"}:
-                    retained_parent, retained_children, retained_linked = (
-                        _retained_attempt_records(attempt_evidence_dir)
-                    )
+                    (
+                        retained_parent,
+                        retained_children,
+                        retained_linked,
+                        retained_inventory,
+                    ) = _retained_attempt_records(attempt_evidence_dir)
                 else:
                     retained_parent, retained_children, retained_linked = [], {}, []
+                    retained_inventory = {}
                 tagged_records = [{"session": "parent", "record": record} for record in retained_parent]
                 tagged_records.extend(
                     {"session": child_id, "record": record}
@@ -1012,7 +1127,12 @@ def call_api(prompt: str, options: dict[str, Any], context: dict[str, Any]) -> d
                     else []
                 )
                 lookups = tool_lookups(stdout, workspace, tagged_records, scratch)
-                usage = usage_summary(retained_parent, retained_children, retained_linked)
+                usage = usage_summary(
+                    retained_parent,
+                    retained_children,
+                    retained_linked,
+                    retained_inventory,
+                )
                 if evidence_status != "retained" and usage.get("coverage") == "complete":
                     # Usage read from incomplete evidence is not covered usage:
                     # a subagent log that could not be copied (or any other

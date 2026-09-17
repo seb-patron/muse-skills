@@ -24,6 +24,7 @@ from behavioral.providers import attempt_evidence, muse_provider
 SESSION_ID = "aaaaaaaa-1111-2222-3333-444444444444"
 OTHER_SESSION_ID = "bbbbbbbb-1111-2222-3333-444444444444"
 CHILD_ID = "cccccccc-1111-2222-3333-444444444444"
+OTHER_CHILD_ID = "dddddddd-1111-2222-3333-444444444444"
 
 
 def stream_event(payload_type, payload, run_id=None, session_id=SESSION_ID):
@@ -582,6 +583,79 @@ class RetentionTests(unittest.TestCase):
             (self.evidence / ATTEMPT_ID / "manifest.json").read_bytes(), manifest_before
         )
 
+    def test_missing_child_log_is_explicit_gap(self):
+        session_dir = make_session_dir(self.sessions, records=[])
+        (session_dir / "subagent" / CHILD_ID).mkdir(parents=True)
+        result = attempt_evidence.retain_attempt_evidence(
+            self.evidence, ATTEMPT_ID, session_dir, self.scratch, None
+        )
+        self.assertIn(f"child-record-missing:{CHILD_ID}", result["evidenceGaps"])
+        self.assertNotEqual(result["evidenceStatus"], "retained")
+
+    def test_symlinked_child_log_not_followed_is_gap(self):
+        session_dir = make_session_dir(self.sessions, records=[])
+        child_dir = session_dir / "subagent" / CHILD_ID
+        child_dir.mkdir(parents=True)
+        real = self.root / "real-child.jsonl"
+        real.write_text(
+            json.dumps(session_record({"kind": "model_completed"})) + "\n",
+            encoding="utf-8",
+        )
+        (child_dir / "session.jsonl").symlink_to(real)
+        result = attempt_evidence.retain_attempt_evidence(
+            self.evidence, ATTEMPT_ID, session_dir, self.scratch, None
+        )
+        self.assertIn(f"child-record-skipped:{CHILD_ID}", result["evidenceGaps"])
+        self.assertNotEqual(result["evidenceStatus"], "retained")
+        manifest = json.loads(
+            (self.evidence / ATTEMPT_ID / "manifest.json").read_text(encoding="utf-8")
+        )
+        links = [entry for entry in manifest["skipped"] if entry.get("type") == "symlink"]
+        self.assertTrue(
+            any(
+                entry["path"] == f"session/subagent/{CHILD_ID}/session.jsonl"
+                for entry in links
+            )
+        )
+        # The link target is never followed: no copy lands in evidence.
+        self.assertFalse(
+            (self.evidence / ATTEMPT_ID / f"session/subagent/{CHILD_ID}/session.jsonl").exists()
+        )
+
+    def test_empty_and_malformed_child_logs_are_unusable_gaps(self):
+        session_dir = make_session_dir(self.sessions, records=[])
+        empty_dir = session_dir / "subagent" / CHILD_ID
+        empty_dir.mkdir(parents=True)
+        (empty_dir / "session.jsonl").write_text("", encoding="utf-8")
+        bad_dir = session_dir / "subagent" / OTHER_CHILD_ID
+        bad_dir.mkdir(parents=True)
+        (bad_dir / "session.jsonl").write_text("{not json\n{{{\n", encoding="utf-8")
+        result = attempt_evidence.retain_attempt_evidence(
+            self.evidence, ATTEMPT_ID, session_dir, self.scratch, None
+        )
+        self.assertIn(f"child-record-unusable:{CHILD_ID}", result["evidenceGaps"])
+        self.assertIn(
+            f"child-record-unusable:{OTHER_CHILD_ID}", result["evidenceGaps"]
+        )
+        self.assertNotEqual(result["evidenceStatus"], "retained")
+
+    def test_reminder_child_without_log_is_missing_gap(self):
+        link = session_record(
+            {
+                "kind": "memory_reminder_child_session_linked",
+                "parent_session_id": SESSION_ID,
+                "child_session_id": OTHER_CHILD_ID,
+            }
+        )
+        session_dir = make_session_dir(self.sessions, records=[link])
+        result = attempt_evidence.retain_attempt_evidence(
+            self.evidence, ATTEMPT_ID, session_dir, self.scratch, None
+        )
+        self.assertIn(
+            f"child-record-missing:{OTHER_CHILD_ID}", result["evidenceGaps"]
+        )
+        self.assertNotEqual(result["evidenceStatus"], "retained")
+
 
 class WrittenFileTests(unittest.TestCase):
     def test_write_edit_write_versions_indexed_with_hashes(self):
@@ -857,6 +931,105 @@ class UsageTests(unittest.TestCase):
         self.assertIsNone(summary["total"])
         self.assertEqual(summary["partialTotal"]["input_tokens"], 10)
         self.assertEqual(summary["partialTotal"]["calls"], 1)
+
+    def test_empty_child_record_list_is_uncovered(self):
+        parent = [model_completed_event(self.usage(10, 5))]
+        summary = attempt_evidence.usage_summary(
+            parent, {"lonely-child": []}, []
+        )
+        # An explicitly supplied empty record list is not evidence of no
+        # model call: the child is uncovered with a null total.
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertEqual(summary["uncoveredChildren"], ["lonely-child"])
+        self.assertEqual(summary["partialTotal"]["input_tokens"], 10)
+        self.assertEqual(summary["children"][0]["status"], "unusable")
+
+    def test_inventory_statuses_drive_uncovered_children(self):
+        parent = [model_completed_event(self.usage(10, 5))]
+        summary = attempt_evidence.usage_summary(
+            parent,
+            {},
+            [{"id": "gone-child", "kind": "reminder"}],
+            {"gone-child": "missing-child-dir",
+             "link-child": "skipped-symlink"},
+        )
+        by_id = {child["id"]: child for child in summary["children"]}
+        self.assertEqual(by_id["gone-child"]["status"], "missing-child-dir")
+        self.assertEqual(by_id["link-child"]["status"], "skipped-symlink")
+        self.assertNotIn("input_tokens", by_id["gone-child"])
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertEqual(
+            summary["uncoveredChildren"], ["gone-child", "link-child"]
+        )
+
+    def test_parsed_child_without_model_calls_is_covered_zero(self):
+        # A parsed record with no model_completed event is supported evidence
+        # of no model call: covered with zero calls, not uncovered.
+        parent = [model_completed_event(self.usage(10, 5))]
+        children = {"quiet-child": [session_record({"kind": "terminal"})]}
+        summary = attempt_evidence.usage_summary(parent, children, [])
+        (child,) = summary["children"]
+        self.assertEqual(child["status"], "no-usage-records")
+        self.assertEqual(summary["coverage"], "complete")
+        self.assertEqual(summary["total"]["input_tokens"], 10)
+        self.assertEqual(summary["total"]["calls"], 1)
+
+    def test_empty_usage_object_is_uncovered_call_never_zero(self):
+        parent = [
+            model_completed_event(self.usage(10, 5)),
+            model_completed_event({}),
+        ]
+        summary = attempt_evidence.usage_summary(parent, {}, [])
+        # A usage of {} is not a complete zero-token call: partial coverage
+        # with a null total, and the complete call still sums alone.
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertEqual(summary["partialTotal"]["input_tokens"], 10)
+        self.assertEqual(summary["partialTotal"]["calls"], 1)
+        self.assertEqual(summary["parent"]["usageMissingCalls"], 1)
+
+    def test_usage_missing_required_field_is_uncovered_call(self):
+        usage = self.usage(10, 5)
+        del usage["output_tokens"]
+        parent = [
+            model_completed_event(self.usage(10, 5)),
+            model_completed_event(usage),
+        ]
+        summary = attempt_evidence.usage_summary(parent, {}, [])
+        self.assertEqual(summary["coverage"], "partial")
+        self.assertIsNone(summary["total"])
+        self.assertEqual(summary["partialTotal"]["input_tokens"], 10)
+        self.assertEqual(summary["partialTotal"]["calls"], 1)
+        self.assertEqual(summary["parent"]["usageMissingCalls"], 1)
+
+    def test_usage_missing_only_optional_counters_stays_covered(self):
+        summary = attempt_evidence.usage_summary(
+            [model_completed_event(
+                {"input_tokens": 10, "output_tokens": 5})],
+            {}, [],
+        )
+        # Required fields alone are a complete call; absent optional
+        # counters are recorded, never substituted silently.
+        self.assertEqual(summary["coverage"], "complete")
+        self.assertEqual(summary["total"]["input_tokens"], 10)
+        self.assertEqual(summary["total"]["output_tokens"], 5)
+        self.assertEqual(summary["total"]["cached_tokens"], 0)
+        self.assertEqual(
+            sorted(summary["parent"]["usageAbsentOptionalFields"]),
+            ["cache_read_tokens", "cache_write_tokens",
+             "cached_tokens", "reasoning_tokens"],
+        )
+
+    def test_nothing_observed_with_uncovered_child_is_unknown(self):
+        summary = attempt_evidence.usage_summary(
+            [], {}, [{"id": "gone-child", "kind": "reminder"}]
+        )
+        self.assertEqual(summary["coverage"], "unknown")
+        self.assertIsNone(summary["total"])
+        self.assertNotIn("partialTotal", summary)
+        self.assertEqual(summary["uncoveredChildren"], ["gone-child"])
 
 
 class ProviderAttemptTests(unittest.TestCase):
@@ -1385,6 +1558,91 @@ class ProviderAttemptTests(unittest.TestCase):
         self.assertFalse(scored["false_approval"])
         self.assertIsNone(scored["verdict_accuracy"])
 
+    def test_uncovered_child_omits_tokens_through_call_api(self):
+        stdout = self.completed_stream()
+        link = session_record(
+            {
+                "kind": "memory_reminder_child_session_linked",
+                "parent_session_id": SESSION_ID,
+                "child_session_id": OTHER_CHILD_ID,
+            }
+        )
+        records = [
+            model_completed_event(
+                {"input_tokens": 10, "output_tokens": 5, "cached_tokens": 0,
+                 "cache_write_tokens": 0, "cache_read_tokens": 0,
+                 "reasoning_tokens": 0}
+            ),
+            link,
+        ]
+        response, _ = self.call(stdout, session_records=records)
+        self.assertNotIn("error", response)
+        metadata = response["metadata"]
+        # The linked child has no retained log: evidence cannot be retained.
+        self.assertNotEqual(metadata["evidenceStatus"], "retained")
+        self.assertIn(
+            f"child-record-missing:{OTHER_CHILD_ID}", metadata["evidenceGaps"]
+        )
+        usage = metadata["museUsage"]
+        self.assertEqual(usage["coverage"], "partial")
+        self.assertIsNone(usage["total"])
+        self.assertIn(OTHER_CHILD_ID, usage["uncoveredChildren"])
+        # Nothing complete leaks through: no tokenUsage, no complete total,
+        # and the candidate status is never observed.
+        self.assertNotIn("tokenUsage", response)
+        self.assertIsNone(response["metadata"].get("museTokenUsage"))
+        self.assertEqual(metadata["candidateTokenStatus"], "partial")
+        self.assertNotEqual(metadata["candidateTokenStatus"], "observed")
+
+    def test_symlinked_child_log_omits_tokens_through_call_api(self):
+        stdout = self.completed_stream()
+        session_dir = self.make_session(
+            records=[
+                model_completed_event(
+                    {"input_tokens": 10, "output_tokens": 5,
+                     "cached_tokens": 0, "cache_write_tokens": 0,
+                     "cache_read_tokens": 0, "reasoning_tokens": 0}
+                )
+            ]
+        )
+        child_dir = session_dir / "subagent" / CHILD_ID
+        child_dir.mkdir(parents=True)
+        outside = Path(self.temp.name) / "outside-child.jsonl"
+        outside.write_text("{}\n", encoding="utf-8")
+        (child_dir / "session.jsonl").symlink_to(outside)
+        response, _ = self.call(stdout)
+        self.assertNotIn("error", response)
+        metadata = response["metadata"]
+        self.assertIn(
+            f"child-record-skipped:{CHILD_ID}", metadata["evidenceGaps"]
+        )
+        self.assertEqual(metadata["museUsage"]["coverage"], "partial")
+        self.assertIsNone(metadata["museUsage"]["total"])
+        self.assertNotIn("tokenUsage", response)
+        self.assertEqual(metadata["candidateTokenStatus"], "partial")
+        self.assertNotEqual(metadata["candidateTokenStatus"], "observed")
+
+    def test_attempt_integrity_ledger_status_requires_ok(self):
+        good = {"metadata": {"completionStatus": "completed",
+                             "headBinding": "match",
+                             "sessionWorkspaceBinding": "match",
+                             "evidenceStatus": "retained",
+                             "ledgerStatus": "ok"}}
+        self.assertTrue(review_contract.assert_attempt_integrity("", good)["pass"])
+        for bad in ("failed", "not-enabled", "bogus-value"):
+            with self.subTest(ledgerStatus=bad):
+                context = {"metadata": {**good["metadata"], "ledgerStatus": bad}}
+                verdict = review_contract.assert_attempt_integrity("", context)
+                self.assertFalse(verdict["pass"])
+                # The reason names the ledger status value itself.
+                self.assertIn(bad, verdict["reason"])
+        with self.subTest(ledgerStatus="missing"):
+            metadata = {key: value for key, value in good["metadata"].items()
+                        if key != "ledgerStatus"}
+            verdict = review_contract.assert_attempt_integrity("", metadata)
+            self.assertFalse(verdict["pass"])
+            self.assertIn("None", verdict["reason"])
+
 
 def deterministic_row(provider, case, verdict, expected="NEEDS_FIXES", flags=(),
                       boundary=1, attempt=None, completion_status=None, error=None):
@@ -1617,6 +1875,260 @@ class AccountingTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(out_path.read_text(encoding="utf-8"), "preserve me\n")
+
+    def run_accounting_cli(self, schedule, input_path=None, ledger_lines=None):
+        """Run the scoring accounting CLI in a temp dir; return (result, payload)."""
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            schedule_path = temp_path / "schedule.json"
+            schedule_path.write_text(json.dumps(schedule), encoding="utf-8")
+            argv = [sys.executable, "evals/behavioral/scoring.py",
+                    "--schedule", str(schedule_path)]
+            if input_path is not None:
+                argv += ["--input", str(input_path)]
+            if ledger_lines is not None:
+                ledger_path = temp_path / "attempts.jsonl"
+                ledger_path.write_text(
+                    "".join(json.dumps(line) + "\n" for line in ledger_lines),
+                    encoding="utf-8",
+                )
+                argv += ["--ledger", str(ledger_path)]
+            out_path = temp_path / "accounting.json"
+            argv += ["--accounting-output", str(out_path)]
+            result = subprocess.run(
+                argv, cwd=experiment.ROOT,
+                capture_output=True, text=True, check=False,
+            )
+            payload = None
+            if out_path.exists():
+                payload = json.loads(out_path.read_text(encoding="utf-8"))
+            return result, payload
+
+    def write_input(self, directory, name, data: bytes):
+        path = Path(directory) / name
+        path.write_bytes(data)
+        return path
+
+    def test_truncated_raw_result_still_accounts_every_slot(self):
+        raw = b'{"results": {"results": [{"provider": {"label": "p1"}}'
+        digest = hashlib.sha256(raw).hexdigest()
+        with tempfile.TemporaryDirectory() as temp:
+            input_path = self.write_input(temp, "result.json", raw)
+            result, payload = self.run_accounting_cli(self.SCHEDULE, input_path)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            accounting = payload["accounting"]
+            raw_result = accounting["rawResult"]
+            self.assertEqual(raw_result["status"], "unparsable")
+            self.assertEqual(raw_result["errorType"], "JSONDecodeError")
+            self.assertTrue(raw_result["error"])
+            self.assertEqual(raw_result["bytes"], len(raw))
+            self.assertEqual(raw_result["sha256"], digest)
+            # Every scheduled slot stays listed from the ledger/schedule
+            # alone; none becomes delivered, completed or eligible.
+            self.assertEqual(len(accounting["slots"]), 4)
+            for slot in accounting["slots"]:
+                self.assertNotIn(slot["status"], ("completed", "quarantined"))
+            # The raw result file is never modified or rewritten.
+            self.assertEqual(input_path.read_bytes(), raw)
+
+    def test_empty_raw_result_is_recorded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            input_path = self.write_input(temp, "result.json", b"")
+            result, payload = self.run_accounting_cli(self.SCHEDULE, input_path)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            raw_result = payload["accounting"]["rawResult"]
+            self.assertEqual(raw_result["status"], "empty")
+            self.assertEqual(raw_result["bytes"], 0)
+            self.assertEqual(
+                raw_result["sha256"], hashlib.sha256(b"").hexdigest()
+            )
+            self.assertEqual(len(payload["accounting"]["slots"]), 4)
+            self.assertEqual(input_path.read_bytes(), b"")
+
+    def test_unreadable_raw_result_is_recorded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            input_path = self.write_input(
+                temp, "result.json", b'{"results": {"results": []}}'
+            )
+            input_path.chmod(0o000)
+            try:
+                try:
+                    input_path.read_bytes()
+                except OSError:
+                    blocked = True
+                else:
+                    blocked = False
+                if not blocked:
+                    self.skipTest("mode 000 is still readable in this environment")
+                result, payload = self.run_accounting_cli(
+                    self.SCHEDULE, input_path
+                )
+            finally:
+                input_path.chmod(0o600)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            raw_result = payload["accounting"]["rawResult"]
+            self.assertEqual(raw_result["status"], "unreadable")
+            self.assertEqual(raw_result["errorType"], "PermissionError")
+            self.assertIsNone(raw_result["bytes"])
+            self.assertIsNone(raw_result["sha256"])
+            self.assertEqual(len(payload["accounting"]["slots"]), 4)
+
+    def test_directory_raw_result_is_unreadable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result, payload = self.run_accounting_cli(
+                self.SCHEDULE, Path(temp)
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            raw_result = payload["accounting"]["rawResult"]
+            self.assertEqual(raw_result["status"], "unreadable")
+            self.assertIsNone(raw_result["bytes"])
+            self.assertEqual(len(payload["accounting"]["slots"]), 4)
+
+    def test_wrong_shape_raw_result_is_recorded(self):
+        for raw in (b'{"foo": 1}', b'[1, 2]', b'{"results": {}}', b'null'):
+            with self.subTest(raw=raw):
+                with tempfile.TemporaryDirectory() as temp:
+                    input_path = self.write_input(temp, "result.json", raw)
+                    result, payload = self.run_accounting_cli(
+                        self.SCHEDULE, input_path
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    raw_result = payload["accounting"]["rawResult"]
+                    self.assertEqual(raw_result["status"], "wrong-shape")
+                    self.assertEqual(raw_result["bytes"], len(raw))
+                    self.assertEqual(
+                        raw_result["sha256"], hashlib.sha256(raw).hexdigest()
+                    )
+                    self.assertEqual(len(payload["accounting"]["slots"]), 4)
+
+    def test_missing_raw_result_lists_slots_from_ledger_alone(self):
+        ledger = [
+            {"phase": "started", "scheduleKey": "p1|c1|null",
+             "attemptId": "attempt-s1", "providerLabel": "p1",
+             "case_id": "c1", "repeatIndex": 0},
+        ]
+        result, payload = self.run_accounting_cli(
+            self.SCHEDULE, None, ledger
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        accounting = payload["accounting"]
+        self.assertEqual(accounting["rawResult"]["status"], "missing")
+        by_slot = {(slot["provider"], slot["case"]): slot
+                   for slot in accounting["slots"]}
+        self.assertEqual(by_slot["p1", "c1"]["status"], "started-not-finished")
+        self.assertEqual(by_slot["p1", "c1"]["attemptId"], "attempt-s1")
+
+    def test_parsed_raw_result_carries_bytes_and_sha(self):
+        rows = [deterministic_row("p1", "c1", "APPROVE", attempt="attempt-a")]
+        ledger = [
+            {"phase": "started", "scheduleKey": "p1|c1|null",
+             "attemptId": "attempt-a", "providerLabel": "p1",
+             "case_id": "c1", "repeatIndex": 0},
+            {"phase": "finished", "scheduleKey": "p1|c1|null",
+             "attemptId": "attempt-a", "providerLabel": "p1",
+             "case_id": "c1", "repeatIndex": 0,
+             "completionStatus": "completed", "error": None},
+        ]
+        raw = json.dumps({"results": {"results": rows}}).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temp:
+            input_path = self.write_input(temp, "result.json", raw)
+            result, payload = self.run_accounting_cli(
+                self.SCHEDULE, input_path, ledger
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            raw_result = payload["accounting"]["rawResult"]
+            self.assertEqual(raw_result["status"], "parsed")
+            self.assertEqual(raw_result["bytes"], len(raw))
+            self.assertEqual(
+                raw_result["sha256"], hashlib.sha256(raw).hexdigest()
+            )
+
+    def test_finished_timeout_ledger_without_row_keeps_facts(self):
+        ledger = [
+            {"phase": "started", "scheduleKey": "p1|c1|null",
+             "attemptId": "attempt-t1", "providerLabel": "p1",
+             "case_id": "c1", "repeatIndex": 0},
+            {"phase": "finished", "scheduleKey": "p1|c1|null",
+             "attemptId": "attempt-t1", "providerLabel": "p1",
+             "case_id": "c1", "repeatIndex": 0,
+             "completionStatus": "timeout",
+             "error": "Muse timed out after 60s",
+             "flags": ["evidence-unavailable"],
+             "evidenceStatus": "partial"},
+        ]
+        result = scoring.account_attempts(self.SCHEDULE, ledger, None)
+        by_slot = {(slot["provider"], slot["case"]): slot
+                   for slot in result["accounting"]["slots"]}
+        slot = by_slot["p1", "c1"]
+        self.assertTrue(slot["status"].startswith("error:"))
+        self.assertIn("timed out", slot["status"])
+        self.assertEqual(slot["attemptId"], "attempt-t1")
+        # The ledger's facts stay visible in explicitly named fields,
+        # separate from the missing raw/scored output.
+        self.assertEqual(slot["rawRow"], "missing")
+        self.assertEqual(slot["ledgerCompletionStatus"], "timeout")
+        self.assertEqual(slot["ledgerError"], "Muse timed out after 60s")
+        self.assertEqual(slot["ledgerFlags"], ["evidence-unavailable"])
+        self.assertEqual(slot["ledgerEvidenceStatus"], "partial")
+        self.assertFalse(slot["deliveredReview"])
+        self.assertFalse(slot["completion"])
+        self.assertIsNone(slot["deterministic"])
+        # No ledger-only slot becomes completed, delivered or eligible.
+        for entry in result["accounting"]["slots"]:
+            self.assertNotIn(entry["status"], ("completed", "quarantined"))
+
+    def test_finished_completed_ledger_without_row_is_finished_no_result(self):
+        ledger = [
+            {"phase": "started", "scheduleKey": "p1|c1|null",
+             "attemptId": "attempt-c1", "providerLabel": "p1",
+             "case_id": "c1", "repeatIndex": 0},
+            {"phase": "finished", "scheduleKey": "p1|c1|null",
+             "attemptId": "attempt-c1", "providerLabel": "p1",
+             "case_id": "c1", "repeatIndex": 0,
+             "completionStatus": "completed", "error": None,
+             "flags": [], "evidenceStatus": "retained"},
+        ]
+        result = scoring.account_attempts(self.SCHEDULE, ledger, None)
+        by_slot = {(slot["provider"], slot["case"]): slot
+                   for slot in result["accounting"]["slots"]}
+        slot = by_slot["p1", "c1"]
+        # A finished record claiming completed with no row is distinct from
+        # completed: inspectable, never delivered.
+        self.assertEqual(slot["status"], "finished-no-result")
+        self.assertEqual(slot["attemptId"], "attempt-c1")
+        self.assertEqual(slot["ledgerCompletionStatus"], "completed")
+        self.assertIsNone(slot["ledgerError"])
+        self.assertFalse(slot["deliveredReview"])
+        self.assertFalse(slot["completion"])
+
+    def test_unmatched_ledger_attempt_stays_individually_inspectable(self):
+        ledger = [
+            {"phase": "started", "scheduleKey": "ghost|gx|null",
+             "attemptId": "ghost-1", "providerLabel": "ghost",
+             "case_id": "gx", "repeatIndex": 0},
+            {"phase": "finished", "scheduleKey": "ghost|gx|null",
+             "attemptId": "ghost-1", "providerLabel": "ghost",
+             "case_id": "gx", "repeatIndex": 0,
+             "completionStatus": "completed", "error": None,
+             "flags": ["stray"], "evidenceStatus": "retained"},
+        ]
+        result = scoring.account_attempts(self.SCHEDULE, ledger, None)
+        accounting = result["accounting"]
+        self.assertEqual(accounting["ledgerLines"], 2)
+        (entry,) = accounting["unassignedAttempts"]
+        self.assertEqual(entry["attemptId"], "ghost-1")
+        self.assertEqual(entry["scheduleKey"], "ghost|gx|null")
+        self.assertEqual(entry["phases"], ["finished", "started"])
+        self.assertEqual(entry["completionStatus"], "completed")
+        self.assertIsNone(entry["error"])
+        self.assertEqual(entry["flags"], ["stray"])
+        self.assertEqual(entry["evidenceStatus"], "retained")
+        # Scheduled slots are untouched and the stray attempt leaks nowhere.
+        self.assertTrue(
+            all(slot["status"] == "missing" for slot in accounting["slots"])
+        )
+        self.assertEqual(accounting["extras"], [])
 
 
 def readout_slot(provider, case, status, attempt, actual, quarantined=False,
@@ -1928,6 +2440,65 @@ class ReadoutTests(unittest.TestCase):
                 json.loads(accounting.read_text(encoding="utf-8")), readout_accounting()
             )
 
+    def test_false_block_pending_confirmed_and_refuted(self):
+        # Three clean-case rejections (expected APPROVE, actual NEEDS_FIXES):
+        # (a) missing adjudication, (b) an accepted novel consequential
+        # finding, (c) an adjudicated unsupported blocker.
+        accounting = {
+            "accounting": {
+                "id": "muse-attempt-accounting-v1",
+                "stage": "synthetic",
+                "schedule": {"providers": ["p1"]},
+                "slots": [
+                    readout_slot("p1", "c4", "completed", "B1", "NEEDS_FIXES"),
+                    readout_slot("p1", "c4", "completed", "B2", "NEEDS_FIXES"),
+                    readout_slot("p1", "c4", "completed", "B3", "NEEDS_FIXES"),
+                ],
+            }
+        }
+        adjudication = {
+            "adjudication_id": "owner-1",
+            "decided_by": "owner",
+            "attempts": {
+                "B2": {
+                    "quarantine": None,
+                    "rationale": "",
+                    "findings": [
+                        {"review_index": 0, "status": "novel-valid",
+                         "key_id": None, "severity": "should-fix"},
+                    ],
+                },
+                "B3": {
+                    "quarantine": None,
+                    "rationale": "",
+                    "findings": [
+                        {"review_index": 0, "status": "unsupported",
+                         "key_id": "k6", "severity": "blocking"},
+                    ],
+                },
+            },
+        }
+        readout = scoring.adjudicated_readout(
+            accounting, READOUT_KEY_MAP, adjudication
+        )["readout"]
+        by_attempt = {entry["attemptId"]: entry for entry in readout["attempts"]}
+        # (a) Pending: null, never counted; the deterministic mismatch stays
+        # visible and unchanged (a key-based fact, not an owner decision).
+        self.assertIsNone(by_attempt["B1"]["adjudicated"]["false_block"])
+        self.assertEqual(
+            by_attempt["B1"]["adjudicated"]["adjudication"], "missing"
+        )
+        self.assertEqual(
+            by_attempt["B1"]["deterministic"]["actual_verdict"], "NEEDS_FIXES"
+        )
+        # (b) An accepted novel valid consequential finding refutes the block.
+        self.assertIs(by_attempt["B2"]["adjudicated"]["false_block"], False)
+        # (c) An adjudicated unsupported blocker confirms the block.
+        self.assertIs(by_attempt["B3"]["adjudicated"]["false_block"], True)
+        provider = readout["providers"]["p1"]
+        self.assertEqual(provider["false_blocks"], 1)
+        self.assertEqual(provider["false_blocks_pending"], 1)
+
 
 class RunnerAccountingTests(unittest.TestCase):
     def test_runner_writes_accounting_before_nonzero_exit(self):
@@ -2109,6 +2680,63 @@ class RunnerAccountingTests(unittest.TestCase):
             cwd=experiment.ROOT, capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_runner_writes_accounting_for_truncated_result(self):
+        output = experiment.ROOT / "evals/behavioral/results/evidence-claims-v3-screen.json"
+        artifacts = [output, *(Path(f"{output}{suffix}") for suffix in (
+            ".metrics-v2.json", ".reservation.json", ".promptfoo", ".traces",
+            ".schedule.json", ".accounting-v1.json"))]
+        for artifact in artifacts:
+            self.assertFalse(artifact.exists(), f"test refuses existing user artifact {artifact}")
+        truncated = b'{"results": {"results": [{"provider":'
+        with tempfile.TemporaryDirectory() as temp:
+            canned = Path(temp) / "canned.json"
+            canned.write_bytes(truncated)
+            fake_bin = Path(temp) / "bin"
+            fake_bin.mkdir()
+            promptfoo = fake_bin / "promptfoo"
+            promptfoo.write_text(
+                '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\n'
+                'cp "$FAKE_CANNED" "$out"\nexit 100\n',
+                encoding="utf-8",
+            )
+            promptfoo.chmod(0o700)
+            try:
+                result = subprocess.run(
+                    ["node", "evals/behavioral/run.mjs", "evidence-claims-v3-screen"],
+                    cwd=experiment.ROOT, capture_output=True, text=True, check=False,
+                    env={
+                        **os.environ,
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                        "SPIKE_PYTHON": sys.executable,
+                        "FAKE_CANNED": str(canned),
+                        "MUSE_EVAL_WORKSPACE_BASE": str(Path(temp) / "outside"),
+                    },
+                )
+                # The truncated result fails the stage, but only after the
+                # accounting file is written from the schedule/ledger alone.
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                accounting = json.loads(
+                    Path(f"{output}.accounting-v1.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(accounting["accounting"]["id"], "muse-attempt-accounting-v1")
+                slots = accounting["accounting"]["slots"]
+                self.assertEqual(len(slots), 6)
+                raw_result = accounting["accounting"]["rawResult"]
+                self.assertEqual(raw_result["status"], "unparsable")
+                self.assertEqual(
+                    raw_result["sha256"], hashlib.sha256(truncated).hexdigest()
+                )
+                for slot in slots:
+                    self.assertNotIn(slot["status"], ("completed", "quarantined"))
+                # The raw output is never modified or rewritten by accounting.
+                self.assertEqual(Path(output).read_bytes(), truncated)
+            finally:
+                for artifact in artifacts:
+                    if artifact.is_dir():
+                        shutil.rmtree(artifact, ignore_errors=True)
+                    else:
+                        artifact.unlink(missing_ok=True)
 
 
 class ProtectedIdentityTests(unittest.TestCase):

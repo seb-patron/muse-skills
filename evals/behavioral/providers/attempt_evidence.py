@@ -252,6 +252,10 @@ def _reminder_child_log_paths(
         if not candidate.is_absolute():
             candidate = sessions_root / candidate
         try:
+            if candidate.is_symlink():
+                # A symlinked child log is never followed; retention records
+                # it as skipped and the child stays uncovered downstream.
+                continue
             resolved = candidate.resolve()
         except OSError:
             continue
@@ -269,6 +273,178 @@ def _session_event(record: Any) -> Any:
     if not isinstance(payload, Mapping):
         return None
     return payload.get("event")
+
+
+CHILD_INVENTORY_STATUSES = frozenset(
+    {"observed", "missing-log", "skipped-symlink", "unusable", "missing-child-dir"}
+)
+
+
+def _parseable_record_present(path: Path) -> bool:
+    """Report whether a session log holds at least one parseable record.
+
+    True when some line parses as a JSON object; False when the log is
+    empty, undecodable, unparsable or unreadable. Symlinks are never
+    followed (a symlink reads as not usable here; callers classify it as
+    ``skipped-symlink`` before consulting this helper).
+    """
+
+    try:
+        if path.is_symlink():
+            return False
+    except OSError:
+        return False
+    try:
+        handle = open(path, "r", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        for line in handle:
+            text = line.strip()
+            if not text.startswith("{"):
+                continue
+            try:
+                record = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                return True
+        return False
+    except (OSError, UnicodeDecodeError):
+        return False
+    finally:
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
+def _child_log_status(child_dir: Path, log: Path) -> str:
+    """Classify one expected child log without following symlinks."""
+
+    try:
+        if child_dir.is_symlink() or log.is_symlink():
+            return "skipped-symlink"
+    except OSError:
+        return "unusable"
+    try:
+        if not log.exists():
+            return "missing-log"
+        if not log.is_file():
+            return "unusable"
+    except OSError:
+        return "unusable"
+    return "observed" if _parseable_record_present(log) else "unusable"
+
+
+def _linked_child_ids(records: Iterable[Any]) -> tuple[set[str], bool]:
+    """Collect valid reminder child ids; flag invalid ones.
+
+    Returns the set of session-UUID child ids from
+    ``memory_reminder_child_session_linked`` events plus whether any linked
+    id failed UUID validation (a traversal id must never reach a path).
+    """
+
+    found: set[str] = set()
+    invalid = False
+    for item in records:
+        event = _session_event(item)
+        if not isinstance(event, Mapping):
+            continue
+        if event.get("kind") != "memory_reminder_child_session_linked":
+            continue
+        child_id = event.get("child_session_id")
+        if not isinstance(child_id, str) or not child_id:
+            continue
+        if SESSION_ID_RE.match(child_id):
+            found.add(child_id)
+        else:
+            invalid = True
+    return found, invalid
+
+
+def _source_child_inventory(
+    session_dir: Path, parent_records: list[dict[str, Any]], sessions_root: Path
+) -> tuple[dict[str, str], dict[str, Path], bool, bool]:
+    """Inventory expected children of a source session directory.
+
+    The expected set is every ``subagent/<id>/`` entry (even when its
+    ``session.jsonl`` is missing, a symlink, empty or unreadable) plus every
+    valid ``memory_reminder_child_session_linked`` id in the parent record.
+    Each child maps to ``observed`` | ``missing-log`` | ``skipped-symlink`` |
+    ``unusable`` (empty, unparsable or unreadable) | ``missing-child-dir``
+    (reminder-linked with no usable log). Never follows symlinks and never
+    scans beyond ``session_dir`` and the ids in the record.
+
+    Returns ``(inventory, reminder_logs, invalid, subagents_skipped)`` where
+    ``reminder_logs`` is the retainable id-to-log mapping from
+    ``_reminder_child_log_paths``, ``invalid`` flags an invalid linked id,
+    and ``subagents_skipped`` flags a symlinked ``subagent/`` directory that
+    could not be enumerated.
+    """
+
+    inventory: dict[str, str] = {}
+    subagents = session_dir / "subagent"
+    subagents_skipped = False
+    try:
+        dir_is_link = subagents.is_symlink()
+    except OSError:
+        dir_is_link = False
+    if dir_is_link:
+        subagents_skipped = True
+    else:
+        try:
+            is_dir = subagents.is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir:
+            try:
+                entries = sorted(subagents.iterdir(), key=lambda p: p.name)
+            except OSError:
+                entries = []
+            for child in entries:
+                if not SESSION_ID_RE.match(child.name):
+                    # Only session UUIDs may become path segments; anything
+                    # else is reported as invalid-child-id by the caller.
+                    continue
+                try:
+                    if child.is_symlink():
+                        inventory[child.name] = "skipped-symlink"
+                        continue
+                    if not child.is_dir():
+                        continue
+                except OSError:
+                    inventory[child.name] = "unusable"
+                    continue
+                inventory[child.name] = _child_log_status(child, child / "session.jsonl")
+    reminder_logs, reminder_invalid = _reminder_child_log_paths(
+        session_dir, sessions_root, parent_records
+    )
+    linked, linked_invalid = _linked_child_ids(parent_records)
+    invalid = reminder_invalid or linked_invalid
+    for child_id in sorted(linked):
+        if child_id in inventory:
+            continue
+        log = reminder_logs.get(child_id)
+        if log is None:
+            inventory[child_id] = "missing-child-dir"
+        elif _parseable_record_present(log):
+            inventory[child_id] = "observed"
+        else:
+            inventory[child_id] = "unusable"
+    return inventory, reminder_logs, invalid, subagents_skipped
+
+
+def _child_record_gap(status: str, child_id: str) -> str | None:
+    """Name the retention gap for a non-observed child, if any."""
+
+    if status == "observed":
+        return None
+    if status == "skipped-symlink":
+        return f"child-record-skipped:{child_id}"
+    if status == "unusable":
+        return f"child-record-unusable:{child_id}"
+    return f"child-record-missing:{child_id}"
 
 
 def _iter_session_files(
@@ -501,11 +677,23 @@ def retain_attempt_evidence(
             sessions_root = session_path.parents[3]
         except IndexError:
             sessions_root = session_path.parent
-        reminder_logs, reminder_invalid = _reminder_child_log_paths(
-            session_path, sessions_root, reminder_records
-        )
+        (
+            child_inventory,
+            reminder_logs,
+            reminder_invalid,
+            subagents_skipped,
+        ) = _source_child_inventory(session_path, reminder_records, sessions_root)
         if reminder_invalid and "invalid-child-id" not in gaps:
             gaps.append("invalid-child-id")
+        if subagents_skipped and "child-record-skipped:subagent" not in gaps:
+            gaps.append("child-record-skipped:subagent")
+        # Any expected child without a retained regular session.jsonl is an
+        # explicit gap (never silent "retained"): a missing log, a symlink
+        # left behind, or an empty/unparsable record.
+        for child_id in sorted(child_inventory):
+            gap = _child_record_gap(child_inventory[child_id], child_id)
+            if gap is not None and gap not in gaps:
+                gaps.append(gap)
         for child_id, log_path in sorted(reminder_logs.items()):
             candidates.append((log_path, f"session/reminder/{child_id}/{log_path.name}"))
 
@@ -1109,6 +1297,27 @@ def _usage_value(usage: Any, key: str) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
 
+# Runtime contract (packet section 3): every model_completed usage carries
+# these counters. input/output tokens are required; the rest are optional
+# and may be absent (recorded, never defaulted for a required field).
+REQUIRED_USAGE_FIELDS = ("input_tokens", "output_tokens")
+OPTIONAL_USAGE_FIELDS = (
+    "cached_tokens",
+    "cache_write_tokens",
+    "cache_read_tokens",
+    "reasoning_tokens",
+)
+
+
+def _usage_field(usage: Mapping[str, Any], key: str) -> int | None:
+    """Return a valid non-negative int counter, else None (absent/invalid)."""
+
+    value = usage.get(key)
+    if isinstance(value, bool):
+        return None
+    return value if isinstance(value, int) and value >= 0 else None
+
+
 def _zero_usage() -> dict[str, int]:
     return {key: 0 for key in USAGE_KEYS}
 
@@ -1158,6 +1367,7 @@ def _summarize_usage_records(
     sums = _zero_usage()
     calls = 0
     usage_missing = 0
+    absent_optional: set[str] = set()
     provider_attributions = 0
     attributed_input = 0
     attributed_output = 0
@@ -1198,13 +1408,28 @@ def _summarize_usage_records(
                 # never zeros: it forces partial coverage downstream.
                 usage_missing += 1
                 continue
-            for key in USAGE_KEYS:
-                sums[key] += _usage_value(usage, key)
+            required = {key: _usage_field(usage, key) for key in REQUIRED_USAGE_FIELDS}
+            if any(value is None for value in required.values()):
+                # A usage object missing a required field is not a complete
+                # zero-token call: count it as an uncovered call and never
+                # substitute zero for the required field.
+                usage_missing += 1
+                continue
+            for key in REQUIRED_USAGE_FIELDS:
+                sums[key] += int(required[key])
+            for key in OPTIONAL_USAGE_FIELDS:
+                value = _usage_field(usage, key)
+                if value is None:
+                    absent_optional.add(key)
+                else:
+                    sums[key] += value
             calls += 1
     detail: dict[str, Any] = {
         **sums,
         "calls": calls,
         "model_completed_without_usage": usage_missing,
+        "usageMissingCalls": usage_missing,
+        "usageAbsentOptionalFields": sorted(absent_optional),
         "usageConsistency": (
             "match"
             if (
@@ -1244,6 +1469,7 @@ def usage_summary(
     parent_records: Iterable[Any] | None,
     child_records_by_id: Mapping[str, Any] | None = None,
     linked_child_ids: Iterable[Any] | None = None,
+    child_inventory: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Summarize per-call token usage without double counting.
 
@@ -1258,11 +1484,21 @@ def usage_summary(
     linked reminder child is summarized separately, then totals equal parent
     plus children; child usage is never also counted inside the parent.
 
+    ``child_inventory`` maps child id to its retained-record status
+    (``observed`` | ``missing-log`` | ``skipped-symlink`` | ``unusable`` |
+    ``missing-child-dir``); every child that is not ``observed`` lands in
+    ``uncoveredChildren``. Without an inventory the status is derived from
+    the supplied records alone (None reads as ``missing-log``).
+
     Returns ``{source, parent, children, total | null, coverage}`` where each
-    child is ``{id, kind, status: observed | no-usage-records | missing-log,
-    ...}``. ``total`` is set only when coverage is ``complete``; partial sums
-    go under ``partialTotal`` with the uncovered children listed. Missing
-    records are ``unknown``, never zero; no dollar estimate is produced.
+    child is ``{id, kind, status: observed | no-usage-records | missing-log |
+    skipped-symlink | unusable | missing-child-dir, ...}``. A child whose
+    record parsed and simply contains no ``model_completed`` event is covered
+    with zero calls (``no-usage-records``); an explicitly supplied empty
+    record list without a retained record is uncovered. ``total`` is set only
+    when coverage is ``complete``; partial sums go under ``partialTotal``
+    with the uncovered children listed. Missing records are ``unknown``,
+    never zero; no dollar estimate is produced.
     """
 
     parent_list = list(parent_records or [])
@@ -1273,6 +1509,10 @@ def usage_summary(
             children_specs[child_id] = "subagent"
     for link in _normalize_child_links(linked_child_ids):
         children_specs.setdefault(link["id"], link["kind"])
+    if child_inventory:
+        for child_id in child_inventory:
+            if isinstance(child_id, str) and child_id:
+                children_specs.setdefault(child_id, "subagent")
 
     children: list[dict[str, Any]] = []
     total_sums = _zero_usage()
@@ -1281,14 +1521,28 @@ def usage_summary(
         total_sums[key] += parent.get(key, 0)
     total_calls += int(parent.get("calls", 0))
     uncovered: list[str] = []
-    # A model_completed event without its usage object is not covered usage
-    # (never zeros): any such event forces partial coverage.
+    # A model_completed event without a complete usage object is not covered
+    # usage (never zeros): any such event forces partial coverage.
     incomplete_usage = int(parent.get("model_completed_without_usage", 0)) > 0
     for child_id in sorted(children_specs):
         kind = children_specs[child_id]
         raw = (child_records_by_id or {}).get(child_id)
+        inventory_status = (child_inventory or {}).get(child_id)
+        if inventory_status is not None and inventory_status != "observed":
+            # The retained record is absent or unusable: uncovered, with no
+            # token fields (missing records are unknown, never zero).
+            children.append({"id": child_id, "kind": kind, "status": inventory_status})
+            uncovered.append(child_id)
+            continue
         if raw is None:
-            children.append({"id": child_id, "kind": kind, "status": "missing-log"})
+            status = inventory_status or "missing-log"
+            children.append({"id": child_id, "kind": kind, "status": status})
+            uncovered.append(child_id)
+            continue
+        if not isinstance(raw, (list, tuple)) or len(raw) == 0:
+            # An explicitly supplied empty record set without a retained
+            # record is uncovered: it is not evidence of no model call.
+            children.append({"id": child_id, "kind": kind, "status": "unusable"})
             uncovered.append(child_id)
             continue
         sums, detail = _summarize_usage_records(list(raw))
@@ -1301,28 +1555,42 @@ def usage_summary(
         total_calls += int(detail.get("calls", 0))
         if int(detail.get("model_completed_without_usage", 0)) > 0:
             incomplete_usage = True
-            if child_id not in uncovered:
-                uncovered.append(child_id)
 
     total = {**total_sums, "calls": total_calls} if total_calls else None
+    observed_any = total_calls > 0 or any(
+        entry.get("status") in {"observed", "no-usage-records"} for entry in children
+    )
     if uncovered or incomplete_usage:
         uncovered = sorted(set(uncovered))
-        coverage = "partial"
-        result: dict[str, Any] = {
-            "source": "muse-session-record",
-            "parent": parent,
-            "children": children,
-            "total": None,
-            "partialTotal": {**total_sums, "calls": total_calls},
-            "uncoveredChildren": uncovered,
-            "coverage": coverage,
-        }
+        if observed_any:
+            coverage = "partial"
+            result: dict[str, Any] = {
+                "source": "muse-session-record",
+                "parent": parent,
+                "children": children,
+                "total": None,
+                "partialTotal": {**total_sums, "calls": total_calls},
+                "uncoveredChildren": uncovered,
+                "coverage": coverage,
+            }
+        else:
+            # Nothing observed anywhere: unknown, never zero, with no
+            # partialTotal (a partial sum of nothing is still nothing).
+            result = {
+                "source": "muse-session-record",
+                "parent": parent,
+                "children": children,
+                "total": None,
+                "uncoveredChildren": uncovered,
+                "coverage": "unknown",
+            }
     elif total is None:
         result = {
             "source": "muse-session-record",
             "parent": parent,
             "children": children,
             "total": None,
+            "uncoveredChildren": [],
             "coverage": "unknown",
         }
     else:

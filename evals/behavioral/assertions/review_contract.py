@@ -134,19 +134,22 @@ def assert_answer_key_boundary(output: str, context: dict[str, Any]) -> dict[str
 
 
 def assert_attempt_integrity(output: str, context: dict[str, Any]) -> dict[str, Any]:
-    """Pass only a complete, bound, retained attempt with a written ledger."""
+    """Pass only a complete, bound, retained attempt with a successful ledger."""
 
     del output
     metadata = context.get("metadata") or context.get("providerResponse", {}).get("metadata") or {}
+    # The ledger gate requires a successful write ("ok"): "failed",
+    # "not-enabled", a missing key and any unexpected value all fail. This
+    # helper is not wired into any shipped config (a future task owns that).
     components = {
         "completionStatus": metadata.get("completionStatus") == "completed",
         "headBinding": metadata.get("headBinding") == "match",
         "sessionWorkspaceBinding": metadata.get("sessionWorkspaceBinding") == "match",
         "evidenceStatus": metadata.get("evidenceStatus") == "retained",
-        "ledgerStatus": metadata.get("ledgerStatus") not in {"failed", None},
+        "ledgerStatus": metadata.get("ledgerStatus") == "ok",
     }
     score = sum(components.values()) / len(components)
-    failed = [name for name, ok in components.items() if not ok]
+    failed = [f"{name} (got {metadata.get(name)!r})" for name, ok in components.items() if not ok]
     return _result(
         all(components.values()),
         score,
