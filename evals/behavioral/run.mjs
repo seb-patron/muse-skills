@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
+  hasCompleteAccounting,
   hasCompleteNormalizedRows,
   hasExactRowCardinality,
   isCompletedPromptfooExit,
@@ -10,6 +11,8 @@ import {
   selectProviderLabels,
   SPIKE_PROVIDER_LABELS,
 } from "./selection.mjs";
+
+const ACCOUNTING_ID = "muse-attempt-accounting-v1";
 
 const mode = process.argv[2] ?? "smoke";
 const extraArgs = process.argv.slice(3);
@@ -120,6 +123,8 @@ function developmentOutputPaths(settings) {
     `${output}.reservation.json`,
     `${output}.promptfoo`,
     `${output}.traces`,
+    `${output}.schedule.json`,
+    `${output}.accounting-v1.json`,
   ];
 }
 
@@ -128,8 +133,8 @@ function existingDevelopmentArtifacts(settings) {
 }
 
 function reserveDevelopmentOutput(stageName, settings) {
-  const [output, metrics, reservation, cache, traces] = developmentOutputPaths(settings);
-  const existing = [output, metrics, reservation, cache, traces].filter((path) => existsSync(path));
+  const [output, metrics, reservation, cache, traces, schedule, accounting] = developmentOutputPaths(settings);
+  const existing = [output, metrics, reservation, cache, traces, schedule, accounting].filter((path) => existsSync(path));
   if (existing.length > 0) {
     return { ok: false, reason: `existing development result artifacts: ${existing.join(", ")}` };
   }
@@ -142,6 +147,22 @@ function reserveDevelopmentOutput(stageName, settings) {
     );
   } catch (error) {
     return { ok: false, reason: `unable to reserve development result identity: ${error.message}` };
+  }
+  try {
+    writeFileSync(
+      schedule,
+      `${JSON.stringify({
+        stage: stageName,
+        providers: settings.providers,
+        cases: settings.cases,
+        repeat: settings.repeat,
+        expectedRows: settings.expectedRows,
+        accounting: ACCOUNTING_ID,
+      })}\n`,
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
+    );
+  } catch (error) {
+    return { ok: false, reason: `unable to reserve development attempt schedule: ${error.message}` };
   }
   try {
     mkdirSync(cache, { mode: 0o700 });
@@ -381,20 +402,73 @@ const result = spawnSync(executable, [...commands[mode], ...extraArgs], {
   },
 });
 
+function writeStageAccounting(stageName, settings) {
+  // Account for every scheduled slot after Promptfoo exits (completed or
+  // not). When the Promptfoo output is missing, the accounting step lists
+  // every scheduled slot from the attempt ledger alone.
+  const [output, , , , traces, schedule, accounting] = developmentOutputPaths(settings);
+  const ledger = join(traces, "attempts.jsonl");
+  const scoringArgs = [spikeScoring];
+  if (existsSync(output)) scoringArgs.push("--input", output);
+  scoringArgs.push("--schedule", schedule, "--accounting-output", accounting);
+  if (existsSync(ledger)) scoringArgs.push("--ledger", ledger);
+  const accountingRun = spawnSync(
+    process.env.SPIKE_PYTHON ?? "python3",
+    scoringArgs,
+    { stdio: "inherit", env: process.env },
+  );
+  if (accountingRun.error) console.error(accountingRun.error.message);
+  if (accountingRun.error || accountingRun.status !== 0 || !existsSync(accounting)) {
+    console.error(`${stageName} failed to write attempt accounting at ${accounting}`);
+    return false;
+  }
+  console.log(`${stageName}: wrote attempt accounting at ${accounting}`);
+  return true;
+}
+
+function hasCompleteStageAccounting(settings) {
+  const [, , , , , , accounting] = developmentOutputPaths(settings);
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(accounting, "utf8"));
+  } catch (error) {
+    console.error(`unable to read attempt accounting: ${error.message}`);
+    return false;
+  }
+  return hasCompleteAccounting(parsed, settings.expectedRows);
+}
+
 if (result.error) {
   console.error(result.error.message);
+  if (mode in developmentStages) writeStageAccounting(mode, developmentStages[mode]);
   process.exit(1);
 }
 const promptfooStatus = result.status ?? 1;
-if (mode in spikeStages || mode in developmentStages
+if (mode in developmentStages) {
+  const settings = developmentStages[mode];
+  const accountingWritten = writeStageAccounting(mode, settings);
+  const promptfooDone = isCompletedPromptfooExit(promptfooStatus);
+  const verified = promptfooDone ? verifyExperimentOutput(mode, settings) : false;
+  const accountingComplete = hasCompleteStageAccounting(settings);
+  if (!accountingWritten || !accountingComplete) {
+    if (accountingWritten) {
+      console.error(
+        `${mode} attempt accounting incomplete: expected ${settings.expectedRows} ` +
+        `completed/quarantined slots`,
+      );
+    }
+    process.exit(promptfooDone ? 1 : promptfooStatus);
+  }
+  if (!promptfooDone) process.exit(promptfooStatus);
+  if (!verified) process.exit(1);
+  process.exit(0);
+}
+if (mode in spikeStages
   ? !isCompletedPromptfooExit(promptfooStatus)
   : promptfooStatus !== 0) {
   process.exit(promptfooStatus);
 }
 if (mode in spikeStages && !verifyExperimentOutput(mode, spikeStages[mode], finalistLabels)) {
-  process.exit(1);
-}
-if (mode in developmentStages && !verifyExperimentOutput(mode, developmentStages[mode])) {
   process.exit(1);
 }
 process.exit(0);
