@@ -3,7 +3,8 @@
 `config.json` grants the Devin CLI (SWE-2) a standing permission set for headless runs in this
 repository. Read it as a **permission grant**, not a sandbox, and change it only with the project
 owner's review. It mirrors the shape and caveats of `gen-v-research-tools`' `.devin/config.json`
-(deny > ask > allow, exact-rule execs); see that repo's `.devin/README.md` and issues #148/#156 for
+(same deny/ask/allow sections and exact-rule execs; precedence is described below); see that repo's
+`.devin/README.md` and issues #148/#156 for
 the fuller writeup this one summarizes.
 
 ## What the rules mean
