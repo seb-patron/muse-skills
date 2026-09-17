@@ -89,6 +89,13 @@ explains the grader-only replay over saved v2 reviews. Offline validation is
 available as `npm run eval:development-v3:validate`; the replay made no fresh Muse
 candidate calls and does not imply that the v3 candidate command was run.
 
+## Operator notes
+
+Review delivery contract: [docs/review-verdict-delivery.md](docs/review-verdict-delivery.md).
+Treat a review as accepted only when its delivery status is `DELIVERED`.
+On `DELIVERY_FAILED`, follow the runbook's decision table before acting on a verdict.
+Reviewer count is a workflow choice; nothing here sets a size limit.
+
 ## Contributing
 
 `main` is protected: all changes land via pull request with one approval
