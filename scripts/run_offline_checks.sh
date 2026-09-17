@@ -66,7 +66,7 @@ echo "== git diff --check (staged and unstaged vs HEAD) =="
 git diff --check HEAD
 if [ -n "${CHECK_BASE:-}" ]; then
     echo "== git diff --check ${CHECK_BASE}..HEAD =="
-    git diff --check "$CHECK_BASE" HEAD
+    git diff --check --end-of-options "$CHECK_BASE" HEAD
 fi
 
 echo "run_offline_checks: all offline checks passed"

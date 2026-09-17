@@ -68,3 +68,16 @@ before finishing, and report that subagent's result verbatim plus the model it s
 `.devin/README.md` documents `run_subagent`'s `subagent_explore` profile as read-only and verified;
 it does not document which model the subagent itself is served under, so treat that as unverified
 until a transcript confirms it — do not assume it matches the parent's `swe-2-high`.
+
+## What this config does not guarantee
+
+- `Exec()` rules are whole-word prefix matches on the command as written. A deny such as
+  `Exec(node evals/behavioral/run.mjs)` does not match `node ./evals/behavioral/run.mjs`; it is
+  effective today only because no rule admits bare `node`, so any other spelling falls through to
+  `ask`, which headless mode rejects. Re-check the denies before broadening any `allow` rule.
+- "Read-only" git commands are not strictly read-only: `git diff`, `git log` and `git show` accept
+  `--output=<file>`, and files written by an executed process are not covered by the `Write()`
+  denies (including `.git/**`). Treat the allow-list as a guard against accidents, not a sandbox,
+  and review every run's transcript and resulting tree.
+- The reviewer subagent's served model is not recorded in the transcript (CLI 3000.10.27), so
+  `swe2-run`'s served-model check covers the parent only.
