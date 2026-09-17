@@ -10,10 +10,13 @@ Tracking: [#24](https://github.com/seb-patron/muse-skills/issues/24), parent
 accounting interface: [#25](https://github.com/seb-patron/muse-skills/issues/25).
 Consumer: [#19](https://github.com/seb-patron/muse-skills/issues/19).
 
-Revision 3 answers the owner-requested review on PR #26. It makes the account
+Revision 3 answered the owner-requested review on PR #26: it makes the account
 visible, drops the shared-temp permission sweep and the whole-home mode change,
 fixes the group-access flaw in the old H7 check, and moves passwordless sudo to
-a separate optional step.
+a separate optional step. Revision 4 adds two specification clarifications from
+the follow-up review: the pasteboard and Spotlight surfaces are verified and
+decided separately (V5a/V5b, R3a/R3b), and the untrusted-archive extraction
+policy is stated in full.
 
 ## Goal and non-goals
 
@@ -88,7 +91,8 @@ there later by any process, not just today's leftovers.
 | Inherited user skills and memory | **absent** | fresh `HOME`; `--no-foreign-personal-context` | V8 |
 | Other world-readable locations (for example external volumes or directories outside home) | **not prevented** | exposure scan run as the reviewer at batch boundaries (detection) | V6; residual R1 |
 | Other users' process command lines | **visible** (macOS shows them) | none; narrow operating decision | residual R2 |
-| Owner GUI-session services (pasteboard, Spotlight) | must not reveal owner data | verify; fallback decision | V5; residual R3 |
+| Owner pasteboard | must not reveal owner data | verify; fallback decision | V5a; residual R3a |
+| Spotlight index over owner content | must not reveal owner data | verify; fallback decision | V5b; residual R3b |
 | Server-side Muse account state | unknown | none | residual R4 |
 
 ## Proposed host changes (each needs owner approval)
@@ -265,9 +269,23 @@ reset touches the owner's files or other accounts.
   - it then calls `helper run`, and `helper export` **before**
     `helper cleanup`.
   - A helper failure is an attempt error, never an approval.
-- The exported tar is untrusted. Extract it with
-  `tarfile.extractall(filter="data")` into a fresh 0700 directory, and
-  cross-check model, skill observation and usage against the captured stdout.
+- The exported tar is untrusted, because the reviewer identity produced it.
+  Extraction policy, enforced by the trusted side:
+  - Extract into a fresh 0700 directory that contains nothing else.
+  - Accept **ordinary files and directories only**. Reject symbolic links, hard
+    links, device and character special files, FIFOs, sockets, setuid/setgid
+    bits and any absolute or `..`-bearing member name. Python's
+    `filter="data"` is a floor, not the whole policy: it does not reject every
+    in-destination link, and it imposes no size or count bound
+    ([tarfile verification hints](https://docs.python.org/3/library/tarfile.html#hints-for-further-verification)).
+  - Enforce the same bounds the evidence budget already uses (2000 members and
+    64 MiB total by default), checked against the declared member sizes before
+    extraction and against the bytes actually written during it.
+  - On any violation: stop, extract nothing further, keep the archive
+    unchanged, and record an explicit attempt error. A rejected archive is
+    never a partial success and never an approval.
+  - Then cross-check model, skill observation and usage against the stdout the
+    owner captured.
 - **No-skill condition:** under a fresh `HOME` no user skill exists, so the
   harness's same-name placeholder skill is no longer needed for shadowing.
   Removing it is a #19 configuration decision, recorded before the run.
@@ -312,10 +330,18 @@ only; **an empty mode scan is never evidence of denied access.**
 - **V4 — Reset:** plant a background process, a cron job, an `at` job, a user
   launchd job, a home dotfile and a per-user-temp file in one preflight
   attempt; all must be gone or detected before the next.
-- **V5 — Owner session services:**
-  - `pbpaste` must not return an owner pasteboard canary;
-  - `mdfind -name <canary>` must return nothing for an owner-home canary.
-  - If either fails, see R3.
+- **V5 — Owner session services.** These are two separate surfaces with
+  separate outcomes; neither result stands in for the other.
+  - **V5a, pasteboard:** `pbpaste` must not return an owner pasteboard canary.
+    A failure means the reviewer can read the owner's clipboard (see R3a).
+  - **V5b, Spotlight:** `mdfind -name <canary>` and `mdfind "<canary string>"`
+    must return nothing for an owner-home canary. A failure means the reviewer
+    can enumerate or read indexed owner content (see R3b). An operating rule
+    about the clipboard has no effect on this surface.
+  - Record each outcome separately. Any remedy is verified against the surface
+    that actually failed, by re-running that same check through the identical
+    helper path; a remedy that fixes one surface is not evidence for the
+    other.
 - **V6 — Answer-bearing exposure scan (detection, batch boundaries).** As the
   reviewer, run a bounded search of other readable locations for:
   - Git repositories whose root commit matches this repository or a
@@ -368,12 +394,24 @@ only; **an empty mode scan is never evidence of denied access.**
     anything writing to `/tmp`, is unaffected.
   - #25's command scan could also flag `ps`, `pgrep`, `lsof` and `top` in
     subject traces for audit; that needs separate approval.
-- **R3 — GUI-session services.**
-  - A process started with `sudo -u` may still reach per-session services such
-    as the pasteboard.
-  - If V5 fails, **decide** between (a) not copying answer text to the
-    pasteboard during a batch, or (b) approving a launch route through
-    `launchctl asuser` (a broader sudo rule).
+- **R3a — Pasteboard (if V5a fails).** A process started with `sudo -u` may
+  still reach the owner's per-session pasteboard.
+  - **Decide:** (a) an operating rule not to copy answer text while a batch
+    runs, or (b) a launch route that leaves the owner's session context, such
+    as `launchctl asuser` with a broader sudo rule.
+  - Option (b) is a *candidate*, not a known fix: adopt it only after V5a
+    passes through that exact route.
+- **R3b — Spotlight (if V5b fails).** Spotlight is a separate surface and the
+  pasteboard rule does not touch it.
+  - **Decide:** (a) accept the exposure explicitly, recording that indexed
+    owner content is reachable, or (b) approve a specific, separately verified
+    remedy — for example excluding the eval material's locations from indexing,
+    which is an owner-side setting change and needs its own approval.
+  - Do not assume `launchctl asuser` affects Spotlight results; if it is
+    proposed, V5b must pass through that route before any claim is made.
+  - Until V5b passes, the "no owner material reachable" claim does not hold for
+    indexed content, and that remains a blocker for the corresponding isolation
+    claim rather than a silent residual.
 - **R4 — Server-side account state.**
   - Unknown for a shared Muse account; recorded, never claimed away.
   - #19 alternates the condition order.
