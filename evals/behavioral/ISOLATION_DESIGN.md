@@ -21,9 +21,9 @@ folder, and listed sibling checkouts. On this host the subject can currently
 reach:
 
 - the eval repository, answer keys, prior results and traces;
-- sibling and later clones of case sources — including **world-readable owner
-  clones of the case source and of this repository left in `/private/tmp`**, which
-  any local account could read as well;
+- sibling and later clones of case sources — including world-readable copies
+  of case sources or of this repository left in shared temporary directories,
+  which any local account could read as well;
 - the owner's Muse data (other sessions, memory, session index);
 - user-scope Muse skills, **including an installed copy of the production
   `adversarial-review` skill**, visible to every condition;
