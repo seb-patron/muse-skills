@@ -62,7 +62,11 @@ node --check evals/behavioral/run.mjs
 echo "== node --check evals/behavioral/selection.mjs =="
 node --check evals/behavioral/selection.mjs
 
-echo "== git diff --check =="
-git diff --check
+echo "== git diff --check (staged and unstaged vs HEAD) =="
+git diff --check HEAD
+if [ -n "${CHECK_BASE:-}" ]; then
+    echo "== git diff --check ${CHECK_BASE}..HEAD =="
+    git diff --check "$CHECK_BASE" HEAD
+fi
 
 echo "run_offline_checks: all offline checks passed"
