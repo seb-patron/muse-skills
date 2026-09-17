@@ -12,7 +12,14 @@ the fuller writeup this one summarizes.
   `Exec(scripts/)` would **not** match `scripts/run_offline_checks.sh` — that is why the allow list
   below has an exact entry for every way the wrapper may be invoked (bare, `./`, `bash`, `sh`),
   instead of a `scripts/` prefix rule.
-- Precedence is **deny > ask > allow**. A deny always wins.
+- Precedence is **deny first, then the most specific rule**. A matching deny always wins. Among the
+  remaining rules at the same configuration level, an equally or more specific `allow` overrides a
+  broader `ask` ([permission matching](https://docs.devin.ai/cli/reference/permissions#how-permissions-work);
+  the specific-allow behaviour is recorded in the stable changelog for 3000.10.21, before the
+  3000.10.27 run used here). So the broad `ask: Exec(git)` plus `allow: Exec(git status)` is a
+  working combination, not a conflict: `git status` runs, and any other `git` invocation still
+  becomes an `ask`, which headless mode rejects. Do not remove the broad `git` ask or widen the
+  allow list to "resolve" it.
 - This is not a sandbox: an allow-listed script can still do anything its own body does. Devin's
   permission engine only sees the top-level `Exec` call (e.g. `bash scripts/run_offline_checks.sh`);
   it does not separately police the `python`/`node`/`git` commands that script runs internally. The
@@ -63,11 +70,22 @@ silent fallback to a different model or a Fusion/paid model.
 
 ## Native review requirement
 
-Any coding run must spawn exactly one native SWE-2 review subagent via its `run_subagent` tool
-before finishing, and report that subagent's result verbatim plus the model it served. gen-v's
-`.devin/README.md` documents `run_subagent`'s `subagent_explore` profile as read-only and verified;
-it does not document which model the subagent itself is served under, so treat that as unverified
-until a transcript confirms it — do not assume it matches the parent's `swe-2-high`.
+Any coding run must spawn exactly one native review subagent via its `run_subagent` tool before
+finishing, and report that subagent's result verbatim together with whatever model evidence exists.
+Keep these three facts apart:
+
+1. **Parent served model — observed.** `swe2-run` reads it from the transcript and fails the run if
+   it is not `swe-2-high` throughout.
+2. **Native child execution — observed.** The transcript records the `run_subagent` call, its
+   profile (`subagent_explore`, read-only) and the child's returned result.
+3. **Child served model — unverified.** Nothing in the transcript attributes a model to the child's
+   own generation on CLI 3000.10.27, and `swe2-run`'s check cannot see it.
+
+Never describe the child as a verified same-model or SWE-2 reviewer. If an assignment requires
+verified parent **and** child models, use a route that supplies that evidence (Muse records its
+child's model in the session record) or get a specific owner exception first; do not assume the
+child inherits the parent's model, and do not fall back to a paid model. Recheck account-specific
+promotional eligibility before each separately authorized assignment.
 
 ## What this config does not guarantee
 
@@ -75,6 +93,10 @@ until a transcript confirms it — do not assume it matches the parent's `swe-2-
   `Exec(node evals/behavioral/run.mjs)` does not match `node ./evals/behavioral/run.mjs`; it is
   effective today only because no rule admits bare `node`, so any other spelling falls through to
   `ask`, which headless mode rejects. Re-check the denies before broadening any `allow` rule.
+- Claims here are tied to the CLI version actually used: **3000.10.27**. The stable changelog
+  records a further command-deny matching fix in 3000.10.31 (2026-09-16). That is a reason to keep
+  version-specific wording, not evidence that this configuration has a demonstrated bypass on
+  3000.10.27, and not a reason to upgrade or re-run the check under this assignment.
 - "Read-only" git commands are not strictly read-only: `git diff`, `git log` and `git show` accept
   `--output=<file>`, and files written by an executed process are not covered by the `Write()`
   denies (including `.git/**`). Treat the allow-list as a guard against accidents, not a sandbox,
