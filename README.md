@@ -91,15 +91,10 @@ candidate calls and does not imply that the v3 candidate command was run.
 
 ## Operator notes
 
-Day-to-day lore for running review loops in Muse sessions on this machine —
-not skills, not project policy:
-
-- [docs/review-spawn-checklist.md](docs/review-spawn-checklist.md) — spawn
-  contract so reviewer verdicts survive child-result transport (interim
-  until the `review-verdict-delivery` skill lands; see issue #10).
-- [docs/machine-lore.md](docs/machine-lore.md) — machine-specific
-  workarounds with delete-when conditions (broken `python3.13` shim,
-  child-result archaeology fallback).
+Review delivery contract: [docs/review-verdict-delivery.md](docs/review-verdict-delivery.md).
+Treat a review as accepted only when its delivery status is `DELIVERED`.
+On `DELIVERY_FAILED`, follow the runbook's decision table before acting on a verdict.
+Reviewer count is a workflow choice; nothing here sets a size limit.
 
 ## Contributing
 
